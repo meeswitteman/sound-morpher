@@ -80,6 +80,7 @@ def build_default_registry() -> PluginRegistry:
     from plugins.granular import GranularPlugin
     from plugins.vocoder import VocoderPlugin
     from plugins.world_vocoder import WorldVocoderPlugin
+    from plugins.griffin_lim import GriffinLimPlugin
 
     registry = PluginRegistry()
     registry.register_all([
@@ -89,5 +90,6 @@ def build_default_registry() -> PluginRegistry:
         GranularPlugin(),
         VocoderPlugin(),
         WorldVocoderPlugin(),
+        GriffinLimPlugin(),
     ])
     return registry

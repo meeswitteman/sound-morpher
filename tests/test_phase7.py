@@ -144,7 +144,8 @@ def test_registry_has_all_plugins():
     assert "Granular" in reg
     assert "Vocoder" in reg
     assert "WORLD Vocoder" in reg
-    assert len(reg) == 6
+    assert "Griffin-Lim" in reg
+    assert len(reg) == 7
 
 
 # ── PluginParamPanel ──────────────────────────────────────────────────────────
