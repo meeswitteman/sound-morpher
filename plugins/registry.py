@@ -78,6 +78,7 @@ def build_default_registry() -> PluginRegistry:
     from plugins.spectral_fft import SpectralFftPlugin
     from plugins.pitch_shift import PitchShiftPlugin
     from plugins.granular import GranularPlugin
+    from plugins.vocoder import VocoderPlugin
 
     registry = PluginRegistry()
     registry.register_all([
@@ -85,5 +86,6 @@ def build_default_registry() -> PluginRegistry:
         SpectralFftPlugin(),
         PitchShiftPlugin(),
         GranularPlugin(),
+        VocoderPlugin(),
     ])
     return registry

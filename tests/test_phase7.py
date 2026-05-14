@@ -142,7 +142,8 @@ def test_registry_has_all_plugins():
     assert "Spectral FFT" in reg
     assert "Pitch Shift" in reg
     assert "Granular" in reg
-    assert len(reg) == 4
+    assert "Vocoder" in reg
+    assert len(reg) == 5
 
 
 # ── PluginParamPanel ──────────────────────────────────────────────────────────
