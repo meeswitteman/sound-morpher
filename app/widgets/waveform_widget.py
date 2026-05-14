@@ -15,6 +15,8 @@ class WaveformWidget(QWidget):
         self._audio: np.ndarray | None = None
         self._envelope: np.ndarray | None = None  # shape (N, 2): [min, max] per column
         self._last_width = 0
+        self._trim_start: float | None = None
+        self._trim_end: float | None = None
 
         self.setMinimumHeight(80)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -23,6 +25,14 @@ class WaveformWidget(QWidget):
     def set_audio(self, audio: np.ndarray | None) -> None:
         self._audio = audio
         self._envelope = None
+        self._trim_start: float | None = None
+        self._trim_end: float | None = None
+        self.update()
+
+    def set_trim_region(self, start_frac: float | None, end_frac: float | None) -> None:
+        """Overlay a trim selection. Fractions are in [0.0, 1.0] of audio length."""
+        self._trim_start = start_frac
+        self._trim_end = end_frac
         self.update()
 
     def resizeEvent(self, event) -> None:
@@ -104,3 +114,18 @@ class WaveformWidget(QWidget):
         # Centre line
         painter.setPen(QPen(QColor("#1e1e1e"), 1))
         painter.drawLine(0, int(cy), w, int(cy))
+
+        # Trim region overlay
+        if self._trim_start is not None and self._trim_end is not None:
+            sx = int(self._trim_start * w)
+            ex = int(self._trim_end * w)
+            dim = QColor(0, 0, 0, 160)
+            if sx > 0:
+                painter.fillRect(0, 0, sx, h, dim)
+            if ex < w:
+                painter.fillRect(ex, 0, w - ex, h, dim)
+            marker = QPen(QColor("#ffffff"), 1)
+            marker.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(marker)
+            painter.drawLine(sx, 0, sx, h)
+            painter.drawLine(ex, 0, ex, h)

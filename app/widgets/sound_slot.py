@@ -36,6 +36,7 @@ class SoundSlot(QGroupBox):
         self._label = label
         self._engine = audio_engine
         self._target_sr = target_sr
+        self._accent_color = accent_color
         self._audio: np.ndarray | None = None
         self._display_name: str = ""
 
@@ -69,6 +70,8 @@ class SoundSlot(QGroupBox):
         self._display_name = display_name
         self._waveform.set_audio(normalized)
         self._btn_play.setEnabled(True)
+        self._btn_trim.setEnabled(True)
+        self._btn_volume.setEnabled(True)
         self._update_meta(display_name, normalized)
         self.audio_changed.emit(normalized, self._target_sr)
 
@@ -76,6 +79,8 @@ class SoundSlot(QGroupBox):
         self._audio = None
         self._waveform.set_audio(None)
         self._btn_play.setEnabled(False)
+        self._btn_trim.setEnabled(False)
+        self._btn_volume.setEnabled(False)
         self._lbl_meta.setText("—")
         self.audio_changed.emit(None, self._target_sr)
 
@@ -99,13 +104,27 @@ class SoundSlot(QGroupBox):
         self._btn_play.setEnabled(False)
         self._btn_play.setToolTip(f"Preview Sound {self._label}")
 
+        self._btn_trim = QPushButton("✂")
+        self._btn_trim.setFixedWidth(34)
+        self._btn_trim.setEnabled(False)
+        self._btn_trim.setToolTip(f"Trim Sound {self._label} to a shorter region")
+
+        self._btn_volume = QPushButton("⊿")
+        self._btn_volume.setFixedWidth(34)
+        self._btn_volume.setEnabled(False)
+        self._btn_volume.setToolTip(f"Adjust volume or normalize Sound {self._label}")
+
         self._btn_load.clicked.connect(self._on_load)
         self._btn_record.clicked.connect(self._on_record)
         self._btn_play.clicked.connect(self._on_play)
+        self._btn_trim.clicked.connect(self._on_trim)
+        self._btn_volume.clicked.connect(self._on_volume)
 
         btn_row.addWidget(self._btn_load)
         btn_row.addWidget(self._btn_record)
         btn_row.addWidget(self._btn_play)
+        btn_row.addWidget(self._btn_trim)
+        btn_row.addWidget(self._btn_volume)
         layout.addLayout(btn_row)
 
         self._lbl_meta = QLabel("—")
@@ -154,6 +173,30 @@ class SoundSlot(QGroupBox):
     def _on_play(self) -> None:
         if self._audio is not None:
             self._engine.play(self._audio, self._target_sr)
+
+    def _on_trim(self) -> None:
+        if self._audio is None:
+            return
+        from app.widgets.trim_panel import TrimPanel
+
+        dlg = TrimPanel(
+            self._audio,
+            self._target_sr,
+            self._engine,
+            accent_color=self._accent_color,
+            parent=self,
+        )
+        if dlg.exec() and dlg.trimmed_audio is not None:
+            self.set_audio(dlg.trimmed_audio, self._target_sr, self._display_name)
+
+    def _on_volume(self) -> None:
+        if self._audio is None:
+            return
+        from app.widgets.volume_panel import VolumePanel
+
+        dlg = VolumePanel(self._audio, self._target_sr, self._engine, parent=self)
+        if dlg.exec() and dlg.adjusted_audio is not None:
+            self.set_audio(dlg.adjusted_audio, self._target_sr, self._display_name)
 
     # ── Helpers ────────────────────────────────────────────────────────
 
