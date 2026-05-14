@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "sound-morpher"
+version = "1.0.0"
+description = "Morph between two audio samples in configurable discrete steps"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6",
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "librosa>=0.10",
+    "sounddevice>=0.4",
+    "soundfile>=0.12",
+]
+
+[project.scripts]
+sound-morpher = "main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "plugins*"]
+
+[tool.setuptools.package-data]
+"*" = ["resources/**/*"]
