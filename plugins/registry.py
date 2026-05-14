@@ -79,6 +79,7 @@ def build_default_registry() -> PluginRegistry:
     from plugins.pitch_shift import PitchShiftPlugin
     from plugins.granular import GranularPlugin
     from plugins.vocoder import VocoderPlugin
+    from plugins.world_vocoder import WorldVocoderPlugin
 
     registry = PluginRegistry()
     registry.register_all([
@@ -87,5 +88,6 @@ def build_default_registry() -> PluginRegistry:
         PitchShiftPlugin(),
         GranularPlugin(),
         VocoderPlugin(),
+        WorldVocoderPlugin(),
     ])
     return registry

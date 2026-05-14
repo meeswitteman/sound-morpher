@@ -143,7 +143,8 @@ def test_registry_has_all_plugins():
     assert "Pitch Shift" in reg
     assert "Granular" in reg
     assert "Vocoder" in reg
-    assert len(reg) == 5
+    assert "WORLD Vocoder" in reg
+    assert len(reg) == 6
 
 
 # ── PluginParamPanel ──────────────────────────────────────────────────────────
