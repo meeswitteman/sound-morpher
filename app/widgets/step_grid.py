@@ -30,23 +30,25 @@ class _SpectroWorker(QRunnable):
         tile_h: int,
     ) -> None:
         super().__init__()
-        self.signals   = _SpectroSignals()
-        self._steps    = steps
-        self._sr       = sample_rate
-        self._tile_w   = tile_w
-        self._tile_h   = tile_h
+        self.signals    = _SpectroSignals()
+        self._steps     = steps
+        self._sr        = sample_rate
+        self._tile_w    = tile_w
+        self._tile_h    = tile_h
         self._cancelled = False
-        self.setAutoDelete(True)
+        # setAutoDelete(False): we manage the worker lifetime ourselves so that
+        # the _SpectroSignals QObject is not GC'd before queued signals arrive.
+        self.setAutoDelete(False)
 
     def cancel(self) -> None:
         self._cancelled = True
 
     def run(self) -> None:
-        spec_w = self._tile_w - 16          # 2 × _SPEC_MARGIN
-        spec_h = self._tile_h - 26 - 22    # top header + bottom label
+        spec_w = self._tile_w - 16
+        spec_h = self._tile_h - 26 - 22
         for i, audio in enumerate(self._steps):
             if self._cancelled:
-                return
+                break
             pixmap = compute_spectrogram_pixmap(audio, self._sr, spec_w, spec_h)
             self.signals.tile_ready.emit(i, pixmap)
         self.signals.all_done.emit()
@@ -64,6 +66,12 @@ class StepGrid(QWidget):
         self._tiles: list[StepTile] = []
         self._active_idx: int = -1
         self._worker: _SpectroWorker | None = None
+        # Generation counter: incremented each time we start a new worker.
+        # Allows _on_tile_ready to drop signals from previous (cancelled) workers.
+        self._worker_gen: int = 0
+        # Keep cancelled workers alive (Python reference) until they emit all_done,
+        # preventing the _SpectroSignals QObject from being GC'd mid-flight.
+        self._retiring: list[_SpectroWorker] = []
 
         self._build()
 
@@ -114,14 +122,14 @@ class StepGrid(QWidget):
             )
             tile.clicked.connect(self._on_tile_clicked)
             self._tiles.append(tile)
-            # Insert before the trailing stretch
             self._row.insertWidget(self._row.count() - 1, tile)
 
         self._container.setFixedHeight(TILE_H + 12)
         self._scroll.setMinimumHeight(TILE_H + 16)
         self._container.adjustSize()
 
-        self._start_spectrogram_worker(steps, sample_rate)
+        if steps:
+            self._start_spectrogram_worker(steps, sample_rate)
 
     def set_active(self, step_index: int) -> None:
         if self._active_idx >= 0 and self._active_idx < len(self._tiles):
@@ -148,25 +156,41 @@ class StepGrid(QWidget):
         self.set_active(idx)
         self.step_clicked.emit(idx)
 
+    def _cancel_worker(self) -> None:
+        if self._worker is not None:
+            self._worker.cancel()
+            # Move to retiring list so the Python object (and its _SpectroSignals)
+            # stays alive until all_done fires.
+            self._retiring.append(self._worker)
+            self._worker = None
+        # Bump generation: tile_ready from retiring workers will be ignored.
+        self._worker_gen += 1
+
     def _start_spectrogram_worker(
         self,
         steps: list[np.ndarray],
         sample_rate: int,
     ) -> None:
+        gen = self._worker_gen
         worker = _SpectroWorker(steps, sample_rate, TILE_W, TILE_H)
         self._worker = worker
-        worker.signals.tile_ready.connect(self._on_tile_ready)
-        worker.signals.all_done.connect(self._on_spectro_done)
+        worker.signals.tile_ready.connect(
+            lambda idx, pix, g=gen: self._on_tile_ready(idx, pix, g)
+        )
+        worker.signals.all_done.connect(
+            lambda w=worker, g=gen: self._on_spectro_done(w, g)
+        )
         QThreadPool.globalInstance().start(worker)
 
-    def _on_tile_ready(self, idx: int, pixmap: QPixmap) -> None:
+    def _on_tile_ready(self, idx: int, pixmap: QPixmap, gen: int) -> None:
+        if gen != self._worker_gen:
+            return  # stale signal from a cancelled worker — ignore
         if 0 <= idx < len(self._tiles):
             self._tiles[idx].set_spectrogram(pixmap)
 
-    def _on_spectro_done(self) -> None:
-        self._worker = None
-
-    def _cancel_worker(self) -> None:
-        if self._worker is not None:
-            self._worker.cancel()
+    def _on_spectro_done(self, worker: _SpectroWorker, gen: int) -> None:
+        # Release the worker reference (allows GC now that all signals are done)
+        if worker in self._retiring:
+            self._retiring.remove(worker)
+        if self._worker is worker:
             self._worker = None
