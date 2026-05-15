@@ -3,14 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QStyle,
     QVBoxLayout,
 )
 
@@ -95,22 +98,47 @@ class SoundSlot(QGroupBox):
         layout.addWidget(self._waveform)
 
         btn_row = QHBoxLayout()
-        self._btn_load = QPushButton("Load WAV")
-        self._btn_load.setToolTip(f"Select a WAV file for Sound {self._label}")
-        self._btn_record = QPushButton("● Rec")
+        _W = 38
+        _SYM = "font-size: 19px;"
+
+        # Load — native Windows folder icon
+        self._btn_load = QPushButton()
+        self._btn_load.setIcon(
+            QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
+        self._btn_load.setIconSize(QSize(20, 20))
+        self._btn_load.setFixedWidth(_W)
+        self._btn_load.setToolTip(f"Load WAV file for Sound {self._label}")
+
+        # Record — red square
+        _rec_pix = QPixmap(16, 16)
+        _rec_pix.fill(Qt.GlobalColor.transparent)
+        _p = QPainter(_rec_pix)
+        _p.setBrush(QColor("#dd2222"))
+        _p.setPen(Qt.PenStyle.NoPen)
+        _p.drawRect(1, 1, 14, 14)
+        _p.end()
+        self._btn_record = QPushButton()
+        self._btn_record.setIcon(QIcon(_rec_pix))
+        self._btn_record.setIconSize(QSize(16, 16))
+        self._btn_record.setFixedWidth(_W)
         self._btn_record.setToolTip(f"Record from microphone as Sound {self._label}")
+
         self._btn_play = QPushButton("▶")
-        self._btn_play.setFixedWidth(34)
+        self._btn_play.setStyleSheet(_SYM + " color: #22bb44;")
+        self._btn_play.setFixedWidth(_W)
         self._btn_play.setEnabled(False)
         self._btn_play.setToolTip(f"Preview Sound {self._label}")
 
         self._btn_trim = QPushButton("✂")
-        self._btn_trim.setFixedWidth(34)
+        self._btn_trim.setStyleSheet(_SYM)
+        self._btn_trim.setFixedWidth(_W)
         self._btn_trim.setEnabled(False)
         self._btn_trim.setToolTip(f"Trim Sound {self._label} to a shorter region")
 
         self._btn_volume = QPushButton("⊿")
-        self._btn_volume.setFixedWidth(34)
+        self._btn_volume.setStyleSheet(_SYM)
+        self._btn_volume.setFixedWidth(_W)
         self._btn_volume.setEnabled(False)
         self._btn_volume.setToolTip(f"Adjust volume or normalize Sound {self._label}")
 
