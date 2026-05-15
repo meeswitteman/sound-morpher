@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
 class WaveformWidget(QWidget):
     """Renders an audio waveform as a filled min/max envelope using QPainter."""
+
+    # Emitted when the user clicks the waveform; value is position fraction [0, 1].
+    left_clicked = Signal(float)   # left button  → set start point
+    right_clicked = Signal(float)  # right button → set end point
 
     def __init__(self, color: str = "#00c8c8", parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -38,6 +42,19 @@ class WaveformWidget(QWidget):
     def resizeEvent(self, event) -> None:
         self._envelope = None
         super().resizeEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if self._audio is None or self.width() == 0:
+            return
+        frac = max(0.0, min(1.0, event.position().x() / self.width()))
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.left_clicked.emit(frac)
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.right_clicked.emit(frac)
+
+    def contextMenuEvent(self, event) -> None:
+        # Suppress the default right-click context menu so right-click sets end point.
+        event.accept()
 
     def _compute_envelope(self) -> np.ndarray:
         audio = self._audio

@@ -196,6 +196,15 @@ class MainWindow(QMainWindow):
         self.chk_loop.setToolTip("Loop playback back to step 1 after last step")
         row.addWidget(self.chk_loop)
 
+        row.addWidget(_vline())
+
+        self.chk_dtw = QCheckBox("DTW Align")
+        self.chk_dtw.setToolTip(
+            "Dynamic Time Warping: time-align A and B by their MFCC similarity "
+            "before morphing. Helps when A and B have different tempos or timing."
+        )
+        row.addWidget(self.chk_dtw)
+
         row.addStretch()
         outer.addLayout(row)
 
@@ -379,6 +388,7 @@ class MainWindow(QMainWindow):
             steps=steps,
             sample_rate=self.project.sample_rate,
             params=self._param_panel.get_params(),
+            dtw=self.chk_dtw.isChecked(),
         )
 
     def _on_morph_progress(self, value: int) -> None:

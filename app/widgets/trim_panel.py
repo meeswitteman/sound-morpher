@@ -51,10 +51,14 @@ class TrimPanel(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
-        # Waveform
+        # Waveform — left click sets start, right click sets end
         self._waveform = WaveformWidget(color=color)
         self._waveform.setMinimumHeight(120)
         self._waveform.set_audio(self._audio)
+        self._waveform.setCursor(Qt.CursorShape.CrossCursor)
+        self._waveform.setToolTip("Left-click: set start point  |  Right-click: set end point")
+        self._waveform.left_clicked.connect(self._on_waveform_left)
+        self._waveform.right_clicked.connect(self._on_waveform_right)
         layout.addWidget(self._waveform)
 
         # Time inputs
@@ -122,6 +126,12 @@ class TrimPanel(QDialog):
         self._spin_end.valueChanged.connect(self._on_end_changed)
 
     # ── Slots ──────────────────────────────────────────────────────────
+
+    def _on_waveform_left(self, frac: float) -> None:
+        self._spin_start.setValue(frac * self._duration)
+
+    def _on_waveform_right(self, frac: float) -> None:
+        self._spin_end.setValue(frac * self._duration)
 
     def _on_start_changed(self, value: float) -> None:
         if value > self._spin_end.value():

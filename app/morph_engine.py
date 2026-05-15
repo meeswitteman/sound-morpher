@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
-from plugins.base import MorphPlugin
+from plugins.base import MorphPlugin, dtw_align
 
 
 class _Signals(QObject):
@@ -23,6 +23,7 @@ class _Worker(QRunnable):
         steps: int,
         sample_rate: int,
         params: dict[str, Any],
+        dtw: bool = False,
     ) -> None:
         super().__init__()
         self.signals = _Signals()
@@ -32,14 +33,18 @@ class _Worker(QRunnable):
         self._steps = steps
         self._sample_rate = sample_rate
         self._params = params
+        self._dtw = dtw
         self.setAutoDelete(True)
 
     def run(self) -> None:
         try:
             self.signals.progress.emit(0)
+            a, b = self._audio_a, self._audio_b
+            if self._dtw:
+                a, b = dtw_align(a, b, self._sample_rate)
             result = self._plugin.morph(
-                self._audio_a,
-                self._audio_b,
+                a,
+                b,
                 self._steps,
                 self._sample_rate,
                 **self._params,
@@ -79,13 +84,14 @@ class MorphEngine(QObject):
         steps: int,
         sample_rate: int,
         params: dict[str, Any] | None = None,
+        dtw: bool = False,
     ) -> None:
         """Start async morph computation. Emits finished() or error() when done."""
         if self._active:
             return  # already computing
 
         self._active = True
-        worker = _Worker(plugin, audio_a, audio_b, steps, sample_rate, params or {})
+        worker = _Worker(plugin, audio_a, audio_b, steps, sample_rate, params or {}, dtw=dtw)
         worker.signals.progress.connect(self.progress)
         worker.signals.finished.connect(self._on_finished)
         worker.signals.error.connect(self._on_error)

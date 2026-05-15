@@ -8,9 +8,10 @@ A desktop application for morphing between two audio samples in configurable dis
 
 ## Features
 
-- **6 morphing algorithms** — from simple crossfade to WORLD vocoder
+- **7 morphing algorithms** — from simple crossfade to WORLD vocoder and Griffin-Lim
 - **Spectrogram thumbnails** per morph step, computed on the fly
 - **BPM-synchronized playback** with tap tempo and loop toggle
+- **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing
 - **Live recording** — record directly into a source slot (mic or line-in)
 - **Trim & volume** controls per source slot
 - **Project files** — save and reload full sessions as `.smorph`
@@ -29,6 +30,7 @@ A desktop application for morphing between two audio samples in configurable dis
 | **Granular** | Atmospheric morphs — blends overlapping grains from both sources |
 | **Vocoder (LPC)** | Broadband audio — interpolates LPC spectral envelopes frame by frame |
 | **WORLD Vocoder** | Voices and monophonic melodic samples — interpolates F0, spectral envelope, and aperiodicity using the WORLD speech synthesis framework |
+| **Griffin-Lim** | Experimental / sci-fi textures — interpolates magnitude spectra and reconstructs phase via Griffin-Lim iteration |
 
 ---
 
