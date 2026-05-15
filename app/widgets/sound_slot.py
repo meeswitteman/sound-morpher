@@ -76,6 +76,7 @@ class SoundSlot(QGroupBox):
         self._btn_play.setEnabled(True)
         self._btn_trim.setEnabled(True)
         self._btn_volume.setEnabled(True)
+        self._btn_fade.setEnabled(True)
         self._btn_warp.setEnabled(True)
         self._update_meta(display_name, normalized)
         self.audio_changed.emit(normalized, self._target_sr)
@@ -86,6 +87,7 @@ class SoundSlot(QGroupBox):
         self._btn_play.setEnabled(False)
         self._btn_trim.setEnabled(False)
         self._btn_volume.setEnabled(False)
+        self._btn_fade.setEnabled(False)
         self._btn_warp.setEnabled(False)
         self._lbl_meta.setText("—")
         self.audio_changed.emit(None, self._target_sr)
@@ -145,6 +147,12 @@ class SoundSlot(QGroupBox):
         self._btn_volume.setEnabled(False)
         self._btn_volume.setToolTip(f"Adjust volume or normalize Sound {self._label}")
 
+        self._btn_fade = QPushButton("⤴")
+        self._btn_fade.setStyleSheet(_SYM)
+        self._btn_fade.setFixedWidth(_W)
+        self._btn_fade.setEnabled(False)
+        self._btn_fade.setToolTip(f"Apply fade in or fade out to a selected region of Sound {self._label}")
+
         self._btn_warp = QPushButton("↔")
         self._btn_warp.setStyleSheet(_SYM)
         self._btn_warp.setFixedWidth(_W)
@@ -159,6 +167,7 @@ class SoundSlot(QGroupBox):
         self._btn_play.clicked.connect(self._on_play)
         self._btn_trim.clicked.connect(self._on_trim)
         self._btn_volume.clicked.connect(self._on_volume)
+        self._btn_fade.clicked.connect(self._on_fade)
         self._btn_warp.clicked.connect(self._on_warp)
 
         btn_row.addWidget(self._btn_load)
@@ -166,6 +175,7 @@ class SoundSlot(QGroupBox):
         btn_row.addWidget(self._btn_play)
         btn_row.addWidget(self._btn_trim)
         btn_row.addWidget(self._btn_volume)
+        btn_row.addWidget(self._btn_fade)
         btn_row.addWidget(self._btn_warp)
         layout.addLayout(btn_row)
 
@@ -239,6 +249,21 @@ class SoundSlot(QGroupBox):
         dlg = VolumePanel(self._audio, self._target_sr, self._engine, parent=self)
         if dlg.exec() and dlg.adjusted_audio is not None:
             self.set_audio(dlg.adjusted_audio, self._target_sr, self._display_name)
+
+    def _on_fade(self) -> None:
+        if self._audio is None:
+            return
+        from app.widgets.fade_panel import FadePanel
+
+        dlg = FadePanel(
+            self._audio,
+            self._target_sr,
+            self._engine,
+            accent_color=self._accent_color,
+            parent=self,
+        )
+        if dlg.exec() and dlg.faded_audio is not None:
+            self.set_audio(dlg.faded_audio, self._target_sr, self._display_name)
 
     def _on_warp(self) -> None:
         if self._audio is None:

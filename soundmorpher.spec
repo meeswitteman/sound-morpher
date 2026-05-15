@@ -63,7 +63,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,  # no console window on Windows
-    icon=str(ROOT / "resources" / "icons" / "app.svg"),
+    icon=str(ROOT / "resources" / "icons" / "app.ico"),
 )
 
 coll = COLLECT(
