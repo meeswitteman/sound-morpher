@@ -75,6 +75,7 @@ class SoundSlot(QGroupBox):
         self._btn_play.setEnabled(True)
         self._btn_trim.setEnabled(True)
         self._btn_volume.setEnabled(True)
+        self._btn_warp.setEnabled(True)
         self._update_meta(display_name, normalized)
         self.audio_changed.emit(normalized, self._target_sr)
 
@@ -84,6 +85,7 @@ class SoundSlot(QGroupBox):
         self._btn_play.setEnabled(False)
         self._btn_trim.setEnabled(False)
         self._btn_volume.setEnabled(False)
+        self._btn_warp.setEnabled(False)
         self._lbl_meta.setText("—")
         self.audio_changed.emit(None, self._target_sr)
 
@@ -142,17 +144,28 @@ class SoundSlot(QGroupBox):
         self._btn_volume.setEnabled(False)
         self._btn_volume.setToolTip(f"Adjust volume or normalize Sound {self._label}")
 
+        self._btn_warp = QPushButton("↔")
+        self._btn_warp.setStyleSheet(_SYM)
+        self._btn_warp.setFixedWidth(_W)
+        self._btn_warp.setEnabled(False)
+        self._btn_warp.setToolTip(
+            f"Time Warp Sound {self._label}: drag an anchor point to "
+            "stretch or compress timing without changing pitch"
+        )
+
         self._btn_load.clicked.connect(self._on_load)
         self._btn_record.clicked.connect(self._on_record)
         self._btn_play.clicked.connect(self._on_play)
         self._btn_trim.clicked.connect(self._on_trim)
         self._btn_volume.clicked.connect(self._on_volume)
+        self._btn_warp.clicked.connect(self._on_warp)
 
         btn_row.addWidget(self._btn_load)
         btn_row.addWidget(self._btn_record)
         btn_row.addWidget(self._btn_play)
         btn_row.addWidget(self._btn_trim)
         btn_row.addWidget(self._btn_volume)
+        btn_row.addWidget(self._btn_warp)
         layout.addLayout(btn_row)
 
         self._lbl_meta = QLabel("—")
@@ -225,6 +238,21 @@ class SoundSlot(QGroupBox):
         dlg = VolumePanel(self._audio, self._target_sr, self._engine, parent=self)
         if dlg.exec() and dlg.adjusted_audio is not None:
             self.set_audio(dlg.adjusted_audio, self._target_sr, self._display_name)
+
+    def _on_warp(self) -> None:
+        if self._audio is None:
+            return
+        from app.widgets.timewarp_panel import TimeWarpPanel
+
+        dlg = TimeWarpPanel(
+            self._audio,
+            self._target_sr,
+            self._engine,
+            accent_color=self._accent_color,
+            parent=self,
+        )
+        if dlg.exec() and dlg.warped_audio is not None:
+            self.set_audio(dlg.warped_audio, self._target_sr, self._display_name)
 
     # ── Helpers ────────────────────────────────────────────────────────
 
