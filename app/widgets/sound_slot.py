@@ -24,8 +24,9 @@ from app.widgets.waveform_widget import WaveformWidget
 class SoundSlot(QGroupBox):
     """Displays one sound source (A or B) with waveform, metadata, and controls."""
 
-    audio_changed = Signal(object, int)  # (np.ndarray | None, sample_rate)
-    status_message = Signal(str)        # informational notices (resampling, float WAV, …)
+    audio_changed   = Signal(object, int)  # (np.ndarray | None, sample_rate)
+    status_message  = Signal(str)          # informational notices (resampling, float WAV, …)
+    align_requested = Signal(str)          # emits slot label ("A" or "B") when warp/align clicked
 
     def __init__(
         self,
@@ -149,8 +150,8 @@ class SoundSlot(QGroupBox):
         self._btn_warp.setFixedWidth(_W)
         self._btn_warp.setEnabled(False)
         self._btn_warp.setToolTip(
-            f"Time Warp Sound {self._label}: drag an anchor point to "
-            "stretch or compress timing without changing pitch"
+            f"Align Sound {self._label}: view both A and B at the same scale "
+            "and warp timing to reduce differences before morphing"
         )
 
         self._btn_load.clicked.connect(self._on_load)
@@ -242,17 +243,7 @@ class SoundSlot(QGroupBox):
     def _on_warp(self) -> None:
         if self._audio is None:
             return
-        from app.widgets.timewarp_panel import TimeWarpPanel
-
-        dlg = TimeWarpPanel(
-            self._audio,
-            self._target_sr,
-            self._engine,
-            accent_color=self._accent_color,
-            parent=self,
-        )
-        if dlg.exec() and dlg.warped_audio is not None:
-            self.set_audio(dlg.warped_audio, self._target_sr, self._display_name)
+        self.align_requested.emit(self._label)
 
     # ── Helpers ────────────────────────────────────────────────────────
 

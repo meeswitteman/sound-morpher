@@ -126,6 +126,8 @@ class MainWindow(QMainWindow):
         self.slot_b.audio_changed.connect(self._on_audio_b_changed)
         self.slot_a.status_message.connect(self.statusBar().showMessage)
         self.slot_b.status_message.connect(self.statusBar().showMessage)
+        self.slot_a.align_requested.connect(self._on_align_requested)
+        self.slot_b.align_requested.connect(self._on_align_requested)
 
         layout.addWidget(self.slot_a)
         layout.addWidget(self.slot_b)
@@ -313,6 +315,44 @@ class MainWindow(QMainWindow):
         self.project.name_b = self.slot_b.name
         self._refresh_recompute_button()
         self._set_unsaved(True)
+
+    def _on_align_requested(self, label: str) -> None:
+        audio_a = self.project.audio_a
+        audio_b = self.project.audio_b
+
+        from app.widgets.timewarp_panel import AlignPanel, TimeWarpPanel
+
+        if audio_a is not None and audio_b is not None:
+            dlg = AlignPanel(
+                audio_a, audio_b,
+                self.project.sample_rate,
+                self.audio_engine,
+                warp_target=label,
+                parent=self,
+            )
+            if dlg.exec():
+                if dlg.warped_a is not None:
+                    self.slot_a.set_audio(
+                        dlg.warped_a, self.project.sample_rate,
+                        self.project.name_a or "source_a",
+                    )
+                if dlg.warped_b is not None:
+                    self.slot_b.set_audio(
+                        dlg.warped_b, self.project.sample_rate,
+                        self.project.name_b or "source_b",
+                    )
+        else:
+            # Only one sound loaded: single-waveform fallback
+            slot = self.slot_a if label == "A" else self.slot_b
+            audio = audio_a if label == "A" else audio_b
+            if audio is None:
+                return
+            color = "#00c8c8" if label == "A" else "#c87800"
+            name = (self.project.name_a if label == "A" else self.project.name_b) or f"source_{label.lower()}"
+            dlg = TimeWarpPanel(audio, self.project.sample_rate, self.audio_engine,
+                                accent_color=color, parent=self)
+            if dlg.exec() and dlg.warped_audio is not None:
+                slot.set_audio(dlg.warped_audio, self.project.sample_rate, name)
 
     def _refresh_recompute_button(self) -> None:
         ready = self.project.ready_to_morph and not self.morph_engine.is_running
