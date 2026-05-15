@@ -81,6 +81,7 @@ def build_default_registry() -> PluginRegistry:
     from plugins.vocoder import VocoderPlugin
     from plugins.world_vocoder import WorldVocoderPlugin
     from plugins.griffin_lim import GriffinLimPlugin
+    from plugins.lpc_morph import LpcMorphPlugin
 
     registry = PluginRegistry()
     registry.register_all([
@@ -91,5 +92,6 @@ def build_default_registry() -> PluginRegistry:
         VocoderPlugin(),
         WorldVocoderPlugin(),
         GriffinLimPlugin(),
+        LpcMorphPlugin(),
     ])
     return registry
