@@ -35,6 +35,7 @@ class MorphPlugin(ABC):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         **params: Any,
     ) -> list[np.ndarray]:
         """Return exactly `steps` audio arrays interpolating from A to B.

@@ -40,6 +40,7 @@ class GranularPlugin(MorphPlugin):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         grain_ms: float = 80.0,
         overlap: float = 0.5,
         **_: object,
@@ -51,8 +52,9 @@ class GranularPlugin(MorphPlugin):
 
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
-            mixed = _granular_mix(a, b, t, grain_samples, hop)
-            result.append(mixed)
+            result.append(_granular_mix(a, b, t, grain_samples, hop))
+            if progress_cb:
+                progress_cb(i + 1)
 
         return result
 

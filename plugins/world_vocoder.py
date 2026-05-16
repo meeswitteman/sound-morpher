@@ -58,6 +58,7 @@ class WorldVocoderPlugin(MorphPlugin):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         f0_mode: str = "interpolate",
         frame_ms: float = 5.0,
         **_: Any,
@@ -82,11 +83,9 @@ class WorldVocoderPlugin(MorphPlugin):
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
 
-            # Linear interpolation of spectral envelope and aperiodicity
             sp_mix = (1.0 - t) * sp_a + t * sp_b
             ap_mix = np.clip((1.0 - t) * ap_a + t * ap_b, 0.0, 1.0)
 
-            # Pitch interpolation
             if f0_mode == "keep_a":
                 f0_mix = f0_a.copy()
             elif f0_mode == "keep_b":
@@ -98,18 +97,18 @@ class WorldVocoderPlugin(MorphPlugin):
                 f0_mix, sp_mix, ap_mix, sample_rate, frame_period=frame_ms
             )
 
-            # Trim or pad to match original sample count
             if len(synth) >= n_samples:
                 synth = synth[:n_samples]
             else:
                 synth = np.pad(synth, (0, n_samples - len(synth)))
 
-            # WORLD synthesize can produce peaks slightly above 1.0; clip cleanly.
             peak = np.max(np.abs(synth))
             if peak > 1.0:
                 synth /= peak
 
             result.append(synth.reshape(-1, 1).astype(np.float32))
+            if progress_cb:
+                progress_cb(i + 1)
 
         return result
 

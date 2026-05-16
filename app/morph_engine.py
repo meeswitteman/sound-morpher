@@ -43,19 +43,25 @@ class _Worker(QRunnable):
             a, b = self._audio_a, self._audio_b
             if self._dtw:
                 a, b = dtw_align(a, b, self._sample_rate)
+
+            steps = self._steps
+
+            def _progress(completed: int) -> None:
+                self.signals.progress.emit(int(completed / steps * 100))
+
             result = self._plugin.morph(
                 a,
                 b,
-                self._steps,
+                steps,
                 self._sample_rate,
+                progress_cb=_progress,
                 **self._params,
             )
-            if len(result) != self._steps:
+            if len(result) != steps:
                 raise ValueError(
                     f"Plugin '{self._plugin.name}' returned {len(result)} steps, "
-                    f"expected {self._steps}"
+                    f"expected {steps}"
                 )
-            self.signals.progress.emit(100)
             self.signals.finished.emit(result)
         except Exception as exc:
             self.signals.error.emit(str(exc))
@@ -74,6 +80,7 @@ class MorphEngine(QObject):
         self._pool = QThreadPool.globalInstance()
         self._active = False
         self._generation = 0   # incremented each compute() and cancel()
+        self._worker: _Worker | None = None  # keep Python ref alive during run
 
     @property
     def is_running(self) -> bool:
@@ -101,6 +108,7 @@ class MorphEngine(QObject):
         worker.signals.progress.connect(self.progress)
         worker.signals.finished.connect(lambda result, g=gen: self._on_finished(result, g))
         worker.signals.error.connect(lambda msg, g=gen: self._on_error(msg, g))
+        self._worker = worker  # prevent GC of worker+signals while thread runs
         self._pool.start(worker)
 
     def cancel(self) -> None:
@@ -109,14 +117,15 @@ class MorphEngine(QObject):
         self._generation += 1   # invalidate the running worker's generation
 
     def _on_finished(self, result: list, gen: int) -> None:
+        self._worker = None
         if gen != self._generation:
-            # Stale result from a cancelled or superseded computation
             self.cancelled.emit()
             return
         self._active = False
         self.finished.emit(result)
 
     def _on_error(self, msg: str, gen: int) -> None:
+        self._worker = None
         if gen != self._generation:
             return
         self._active = False

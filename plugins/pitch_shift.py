@@ -40,6 +40,7 @@ class PitchShiftPlugin(MorphPlugin):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         fmin: float = 60.0,
         fmax: float = 4000.0,
         **_: object,
@@ -63,9 +64,9 @@ class PitchShiftPlugin(MorphPlugin):
             else:
                 shifted = a.copy()
 
-            # Blend shifted A toward B in amplitude
-            mixed = ((1 - t) * shifted + t * b).astype(np.float32)
-            result.append(mixed)
+            result.append(((1 - t) * shifted + t * b).astype(np.float32))
+            if progress_cb:
+                progress_cb(i + 1)
 
         return result
 

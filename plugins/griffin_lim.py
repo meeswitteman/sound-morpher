@@ -51,6 +51,7 @@ class GriffinLimPlugin(MorphPlugin):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         fft_size: str = "1024",
         n_iter: int = 32,
         **_: object,
@@ -64,8 +65,9 @@ class GriffinLimPlugin(MorphPlugin):
         result: list[np.ndarray] = []
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
-            mixed = _griffin_lim_mix(a, b, t, n_fft, hop, n_iter, channels)
-            result.append(mixed)
+            result.append(_griffin_lim_mix(a, b, t, n_fft, hop, n_iter, channels))
+            if progress_cb:
+                progress_cb(i + 1)
 
         return result
 

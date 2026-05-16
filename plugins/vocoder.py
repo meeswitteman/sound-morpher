@@ -41,6 +41,7 @@ class VocoderPlugin(MorphPlugin):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         lpc_order: int = 16,
         frame_ms: int = 30,
         **_: object,
@@ -52,8 +53,9 @@ class VocoderPlugin(MorphPlugin):
         result: list[np.ndarray] = []
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
-            mixed = _vocoder_mix(a, b, t, sample_rate, lpc_order, frame_ms)
-            result.append(mixed.reshape(-1, 1).astype(np.float32))
+            result.append(_vocoder_mix(a, b, t, sample_rate, lpc_order, frame_ms).reshape(-1, 1).astype(np.float32))
+            if progress_cb:
+                progress_cb(i + 1)
 
         return result
 

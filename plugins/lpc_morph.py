@@ -72,13 +72,13 @@ class LpcMorphPlugin(MorphPlugin):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         lpc_order: int = 16,
         frame_ms: float = 25.0,
         hop_ms: float = 10.0,
         excitation: str = "A",
         **_: object,
     ) -> list[np.ndarray]:
-        # Force even order — LSF math is simpler and well-defined
         if lpc_order % 2 != 0:
             lpc_order += 1
 
@@ -91,6 +91,8 @@ class LpcMorphPlugin(MorphPlugin):
             result.append(
                 _lpc_morph(a, b, t, sample_rate, lpc_order, frame_ms, hop_ms, excitation, channels)
             )
+            if progress_cb:
+                progress_cb(i + 1)
         return result
 
 

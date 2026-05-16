@@ -42,6 +42,7 @@ class SpectralFftPlugin(MorphPlugin):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         fft_size: str = "1024",
         overlap: int = 75,
         **_: object,
@@ -54,8 +55,9 @@ class SpectralFftPlugin(MorphPlugin):
 
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
-            mixed = _spectral_mix(a, b, t, sample_rate, n_fft, hop, channels)
-            result.append(mixed)
+            result.append(_spectral_mix(a, b, t, sample_rate, n_fft, hop, channels))
+            if progress_cb:
+                progress_cb(i + 1)
 
         return result
 

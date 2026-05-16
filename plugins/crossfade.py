@@ -30,6 +30,7 @@ class CrossfadePlugin(MorphPlugin):
         audio_b: np.ndarray,
         steps: int,
         sample_rate: int,
+        progress_cb=None,
         curve: str = "linear",
         **_: object,
     ) -> list[np.ndarray]:
@@ -39,8 +40,9 @@ class CrossfadePlugin(MorphPlugin):
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
             t_a, t_b = _blend_factors(t, curve)
-            step = (t_a * a + t_b * b).astype(np.float32)
-            result.append(step)
+            result.append((t_a * a + t_b * b).astype(np.float32))
+            if progress_cb:
+                progress_cb(i + 1)
 
         return result
 
