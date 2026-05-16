@@ -130,6 +130,17 @@ class MainWindow(QMainWindow):
         self.slot_b.align_requested.connect(self._on_align_requested)
 
         layout.addWidget(self.slot_a)
+
+        # Overlap button between the two slots
+        self._btn_overlap = QPushButton("⇔  Overlap view")
+        self._btn_overlap.setToolTip(
+            "Show both sounds at the same time scale.\n"
+            "Drag B left/right to set its start offset relative to A."
+        )
+        self._btn_overlap.setEnabled(False)
+        self._btn_overlap.clicked.connect(self._on_overlap)
+        layout.addWidget(self._btn_overlap)
+
         layout.addWidget(self.slot_b)
         layout.addStretch()
         return panel
@@ -315,6 +326,9 @@ class MainWindow(QMainWindow):
         self.project.name_a = self.slot_a.name
         self._refresh_recompute_button()
         self._set_unsaved(True)
+        self._btn_overlap.setEnabled(
+            self.project.audio_a is not None and self.project.audio_b is not None
+        )
 
     def _on_audio_b_changed(self, audio, sr: int) -> None:
         import numpy as np
@@ -322,6 +336,9 @@ class MainWindow(QMainWindow):
         self.project.name_b = self.slot_b.name
         self._refresh_recompute_button()
         self._set_unsaved(True)
+        self._btn_overlap.setEnabled(
+            self.project.audio_a is not None and self.project.audio_b is not None
+        )
 
     def _on_align_requested(self, label: str) -> None:
         audio_a = self.project.audio_a
@@ -360,6 +377,23 @@ class MainWindow(QMainWindow):
                                 accent_color=color, parent=self)
             if dlg.exec() and dlg.warped_audio is not None:
                 slot.set_audio(dlg.warped_audio, self.project.sample_rate, name)
+
+    def _on_overlap(self) -> None:
+        audio_a = self.project.audio_a
+        audio_b = self.project.audio_b
+        if audio_a is None or audio_b is None:
+            return
+        from app.widgets.overlap_panel import OverlapPanel
+        dlg = OverlapPanel(audio_a, audio_b, self.project.sample_rate, parent=self)
+        if dlg.exec():
+            self.slot_a.set_audio(
+                dlg.shifted_a, self.project.sample_rate,
+                self.project.name_a or "source_a",
+            )
+            self.slot_b.set_audio(
+                dlg.shifted_b, self.project.sample_rate,
+                self.project.name_b or "source_b",
+            )
 
     def _refresh_recompute_button(self) -> None:
         ready = self.project.ready_to_morph and not self.morph_engine.is_running
