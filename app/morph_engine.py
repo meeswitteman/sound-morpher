@@ -73,7 +73,7 @@ class MorphEngine(QObject):
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance()
         self._active = False
-        self._cancelled = False
+        self._generation = 0   # incremented each compute() and cancel()
 
     @property
     def is_running(self) -> bool:
@@ -94,26 +94,30 @@ class MorphEngine(QObject):
             return
 
         self._active = True
-        self._cancelled = False
+        self._generation += 1
+        gen = self._generation
+
         worker = _Worker(plugin, audio_a, audio_b, steps, sample_rate, params or {}, dtw=dtw)
         worker.signals.progress.connect(self.progress)
-        worker.signals.finished.connect(self._on_finished)
-        worker.signals.error.connect(self._on_error)
+        worker.signals.finished.connect(lambda result, g=gen: self._on_finished(result, g))
+        worker.signals.error.connect(lambda msg, g=gen: self._on_error(msg, g))
         self._pool.start(worker)
 
     def cancel(self) -> None:
-        """Signal that the current computation should be discarded when it finishes."""
-        self._cancelled = True
-
-    def _on_finished(self, result: list) -> None:
+        """Immediately free the engine for new work; stale result is discarded on arrival."""
         self._active = False
-        if self._cancelled:
-            self._cancelled = False
+        self._generation += 1   # invalidate the running worker's generation
+
+    def _on_finished(self, result: list, gen: int) -> None:
+        if gen != self._generation:
+            # Stale result from a cancelled or superseded computation
             self.cancelled.emit()
-        else:
-            self.finished.emit(result)
-
-    def _on_error(self, msg: str) -> None:
+            return
         self._active = False
-        self._cancelled = False
+        self.finished.emit(result)
+
+    def _on_error(self, msg: str, gen: int) -> None:
+        if gen != self._generation:
+            return
+        self._active = False
         self.error.emit(msg)
