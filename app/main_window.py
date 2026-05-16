@@ -194,9 +194,16 @@ class MainWindow(QMainWindow):
 
         row.addWidget(_vline())
 
-        self.chk_loop = QCheckBox("Loop")
-        self.chk_loop.setToolTip("Loop playback back to step 1 after last step")
-        row.addWidget(self.chk_loop)
+        self.combo_loop = QComboBox()
+        self.combo_loop.addItems(["No Loop", "Loop", "Ping-pong"])
+        self.combo_loop.setToolTip(
+            "No Loop: play once  |  Loop: repeat A→B  |  Ping-pong: A→B→A→B…"
+        )
+        row.addWidget(self.combo_loop)
+
+        self.chk_reverse = QCheckBox("Reverse")
+        self.chk_reverse.setToolTip("Play steps in reverse order (B → A)")
+        row.addWidget(self.chk_reverse)
 
         row.addWidget(_vline())
 
@@ -496,11 +503,13 @@ class MainWindow(QMainWindow):
         self.btn_play_all.style().unpolish(self.btn_play_all)
         self.btn_play_all.style().polish(self.btn_play_all)
         self._rebuild_beat_dots(self.spin_beats.value())
+        loop_map = {0: "off", 1: "loop", 2: "pingpong"}
         self.bpm_engine.configure(
             bpm=self.spin_bpm.value(),
             beats_per_step=self.spin_beats.value(),
             total_steps=len(self.project.morph_steps),
-            loop=self.chk_loop.isChecked(),
+            loop_mode=loop_map.get(self.combo_loop.currentIndex(), "off"),
+            reverse=self.chk_reverse.isChecked(),
         )
         self.bpm_engine.start_playback()
 
@@ -704,7 +713,9 @@ class MainWindow(QMainWindow):
         self.project.algorithm_params = self._param_panel.get_params()
         self.project.bpm = self.spin_bpm.value()
         self.project.beats_per_step = self.spin_beats.value()
-        self.project.loop = self.chk_loop.isChecked()
+        loop_map = {0: "off", 1: "loop", 2: "pingpong"}
+        self.project.loop_mode = loop_map.get(self.combo_loop.currentIndex(), "off")
+        self.project.reverse = self.chk_reverse.isChecked()
         try:
             ProjectFile.save(path, self.project)
         except ProjectFileError as exc:
@@ -733,7 +744,9 @@ class MainWindow(QMainWindow):
         self.spin_steps.setValue(state.steps)
         self.spin_bpm.setValue(state.bpm)
         self.spin_beats.setValue(state.beats_per_step)
-        self.chk_loop.setChecked(state.loop)
+        loop_map = {"off": 0, "loop": 1, "pingpong": 2}
+        self.combo_loop.setCurrentIndex(loop_map.get(state.loop_mode, 0))
+        self.chk_reverse.setChecked(state.reverse)
 
         idx = self.combo_algorithm.findText(state.algorithm)
         if idx >= 0:

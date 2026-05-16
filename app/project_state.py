@@ -22,7 +22,8 @@ class ProjectState:
     algorithm_params: dict = field(default_factory=dict)
     bpm: int = 120
     beats_per_step: int = 4
-    loop: bool = False
+    loop_mode: str = "off"   # "off" | "loop" | "pingpong"
+    reverse: bool = False
 
     morph_steps: list[np.ndarray] = field(default_factory=list)
 

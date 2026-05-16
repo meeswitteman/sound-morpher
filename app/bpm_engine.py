@@ -24,8 +24,8 @@ class BpmEngine(QThread):
         self._bpm:            float = 120.0
         self._beats_per_step: int   = 4
         self._total_steps:    int   = 8
-        self._loop:           bool  = False
-        self._start_step:     int   = 0
+        self._loop_mode:      str   = "off"   # "off" | "loop" | "pingpong"
+        self._reverse:        bool  = False
         self._stop_flag:      bool  = False
 
     # ── Configuration ──────────────────────────────────────────────────
@@ -35,14 +35,14 @@ class BpmEngine(QThread):
         bpm:            float,
         beats_per_step: int,
         total_steps:    int,
-        loop:           bool,
-        start_step:     int = 0,
+        loop_mode:      str  = "off",
+        reverse:        bool = False,
     ) -> None:
         self._bpm            = max(1.0, float(bpm))
         self._beats_per_step = max(1, int(beats_per_step))
         self._total_steps    = max(1, int(total_steps))
-        self._loop           = bool(loop)
-        self._start_step     = max(0, min(start_step, total_steps - 1))
+        self._loop_mode      = loop_mode
+        self._reverse        = bool(reverse)
 
     # ── Control ────────────────────────────────────────────────────────
 
@@ -59,23 +59,22 @@ class BpmEngine(QThread):
     # ── Thread body ────────────────────────────────────────────────────
 
     def run(self) -> None:
-        step = self._start_step
+        n = self._total_steps
+        direction = -1 if self._reverse else 1
+        step = (n - 1) if self._reverse else 0
         beat = 0
         beat_interval = 60.0 / self._bpm
 
-        # Emit first step + first beat immediately
         self.step_advance.emit(step)
         self.beat_tick.emit(beat)
 
         next_beat = time.perf_counter() + beat_interval
 
         while not self._stop_flag:
-            # Sleep until ~2 ms before the next beat
             remaining = next_beat - time.perf_counter()
             if remaining > 0.003:
                 self.msleep(int((remaining - 0.002) * 1000))
 
-            # Busy-wait the last milliseconds for accuracy
             while time.perf_counter() < next_beat:
                 if self._stop_flag:
                     self.playback_stopped.emit()
@@ -85,15 +84,20 @@ class BpmEngine(QThread):
             beat = (beat + 1) % self._beats_per_step
 
             if beat == 0:
-                # Advance to next step
-                step += 1
-                if step >= self._total_steps:
-                    if self._loop:
-                        step = 0
+                step += direction
+
+                if step >= n or step < 0:
+                    if self._loop_mode == "pingpong":
+                        direction = -direction
+                        step += 2 * direction   # undo overshoot + one step back
+                    elif self._loop_mode == "loop":
+                        step = 0 if direction > 0 else n - 1
                     else:
-                        self.step_advance.emit(step - 1)   # ensure last step lit
+                        # Ensure the final step lights up before stopping
+                        self.step_advance.emit(max(0, min(step - direction, n - 1)))
                         self.playback_stopped.emit()
                         return
+
                 self.step_advance.emit(step)
 
             self.beat_tick.emit(beat)

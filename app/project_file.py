@@ -40,7 +40,8 @@ class ProjectFile:
             "algorithm_params": state.algorithm_params,
             "bpm":              state.bpm,
             "beats_per_step":   state.beats_per_step,
-            "loop":             state.loop,
+            "loop_mode":        state.loop_mode,
+            "reverse":          state.reverse,
             "step_count":       len(state.morph_steps),
         }
 
@@ -95,7 +96,8 @@ class ProjectFile:
                     algorithm_params=dict(meta.get("algorithm_params") or {}),
                     bpm=int(meta.get("bpm", 120)),
                     beats_per_step=int(meta.get("beats_per_step", 4)),
-                    loop=bool(meta.get("loop", False)),
+                    loop_mode=meta.get("loop_mode", "off") if "loop_mode" in meta else ("loop" if meta.get("loop") else "off"),
+                    reverse=bool(meta.get("reverse", False)),
                     file_path=str(path),
                 )
 
