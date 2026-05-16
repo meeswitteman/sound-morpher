@@ -12,6 +12,7 @@ class _Signals(QObject):
     progress = Signal(int)        # 0–100
     finished = Signal(list)       # list[np.ndarray]
     error = Signal(str)
+    cancelled = Signal()
 
 
 class _Worker(QRunnable):
@@ -63,14 +64,16 @@ class _Worker(QRunnable):
 class MorphEngine(QObject):
     """Runs morph computation on a QThreadPool worker thread."""
 
-    progress = Signal(int)
-    finished = Signal(list)   # list[np.ndarray]
-    error = Signal(str)
+    progress  = Signal(int)
+    finished  = Signal(list)   # list[np.ndarray]
+    error     = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance()
         self._active = False
+        self._cancelled = False
 
     @property
     def is_running(self) -> bool:
@@ -88,19 +91,29 @@ class MorphEngine(QObject):
     ) -> None:
         """Start async morph computation. Emits finished() or error() when done."""
         if self._active:
-            return  # already computing
+            return
 
         self._active = True
+        self._cancelled = False
         worker = _Worker(plugin, audio_a, audio_b, steps, sample_rate, params or {}, dtw=dtw)
         worker.signals.progress.connect(self.progress)
         worker.signals.finished.connect(self._on_finished)
         worker.signals.error.connect(self._on_error)
         self._pool.start(worker)
 
+    def cancel(self) -> None:
+        """Signal that the current computation should be discarded when it finishes."""
+        self._cancelled = True
+
     def _on_finished(self, result: list) -> None:
         self._active = False
-        self.finished.emit(result)
+        if self._cancelled:
+            self._cancelled = False
+            self.cancelled.emit()
+        else:
+            self.finished.emit(result)
 
     def _on_error(self, msg: str) -> None:
         self._active = False
+        self._cancelled = False
         self.error.emit(msg)

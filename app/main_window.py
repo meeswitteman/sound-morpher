@@ -399,6 +399,7 @@ class MainWindow(QMainWindow):
         self.morph_engine.progress.connect(self._on_morph_progress)
         self.morph_engine.finished.connect(self._on_morph_finished)
         self.morph_engine.error.connect(self._on_morph_error)
+        self.morph_engine.cancelled.connect(self._on_morph_cancelled)
         self.btn_recompute.clicked.connect(self._on_recompute)
 
     def _on_recompute(self) -> None:
@@ -425,8 +426,10 @@ class MainWindow(QMainWindow):
                 f"Computing {steps} morph steps using {plugin_name}…"
             )
 
-        self.btn_recompute.setEnabled(False)
-        self.btn_recompute.setText("⟳  Computing…")
+        self.btn_recompute.setEnabled(True)
+        self.btn_recompute.setText("✕  Cancel")
+        self.btn_recompute.clicked.disconnect()
+        self.btn_recompute.clicked.connect(self._on_cancel_compute)
 
         self.morph_engine.compute(
             plugin=plugin,
@@ -442,9 +445,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Computing… {value}%")
 
     def _on_morph_finished(self, steps: list) -> None:
+        self._reset_recompute_button()
         self.project.morph_steps = steps
         self.project.steps = len(steps)
-        self.btn_recompute.setText("⟳  Recompute")
         self._refresh_recompute_button()
         self.btn_play_all.setEnabled(True)
         self.btn_stop.setEnabled(True)
@@ -473,9 +476,25 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(steps):
             self.audio_engine.play(steps[idx], self.project.sample_rate)
 
+    def _on_cancel_compute(self) -> None:
+        self.morph_engine.cancel()
+        self._reset_recompute_button()
+        self.statusBar().showMessage("Computation cancelled — worker will finish in background")
+
+    def _on_morph_cancelled(self) -> None:
+        self.statusBar().showMessage("Computation cancelled")
+
+    def _reset_recompute_button(self) -> None:
+        self.btn_recompute.setText("⟳  Recompute")
+        try:
+            self.btn_recompute.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self.btn_recompute.clicked.connect(self._on_recompute)
+
     def _on_morph_error(self, message: str) -> None:
         from PySide6.QtWidgets import QMessageBox
-        self.btn_recompute.setText("⟳  Recompute")
+        self._reset_recompute_button()
         self._refresh_recompute_button()
         self.statusBar().showMessage("Morph computation failed")
         QMessageBox.critical(self, "Morph Error", f"Could not compute morph steps:\n\n{message}")
