@@ -145,7 +145,8 @@ def test_registry_has_all_plugins():
     assert "Vocoder" in reg
     assert "WORLD Vocoder" in reg
     assert "Griffin-Lim" in reg
-    assert len(reg) == 7
+    assert "LPC / Source-Filter" in reg
+    assert len(reg) == 8
 
 
 # ── PluginParamPanel ──────────────────────────────────────────────────────────

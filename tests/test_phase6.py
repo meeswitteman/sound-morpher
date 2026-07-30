@@ -18,7 +18,8 @@ def _make_state() -> ProjectState:
     state.algorithm = "Crossfade"
     state.bpm = 130
     state.beats_per_step = 2
-    state.loop = True
+    state.loop_mode = "loop"
+    state.reverse = True
     state.steps = 4
     state.morph_steps = [np.zeros((4410, 2), dtype=np.float32) for _ in range(4)]
     return state
@@ -62,7 +63,8 @@ def test_project_json_schema(tmp_path):
     assert meta["algorithm"] == "Crossfade"
     assert meta["bpm"] == 130
     assert meta["beats_per_step"] == 2
-    assert meta["loop"] is True
+    assert meta["loop_mode"] == "loop"
+    assert meta["reverse"] is True
     assert meta["step_count"] == 4
 
 
@@ -74,13 +76,53 @@ def test_roundtrip(tmp_path):
     assert loaded.sample_rate == 44100
     assert loaded.bpm == 130
     assert loaded.beats_per_step == 2
-    assert loaded.loop is True
+    assert loaded.loop_mode == "loop"
+    assert loaded.reverse is True
     assert loaded.name_a == "a.wav"
     assert loaded.name_b == "b.wav"
     assert loaded.audio_a is not None
     assert loaded.audio_b is not None
     assert len(loaded.morph_steps) == 4
     np.testing.assert_allclose(loaded.audio_b, state.audio_b, atol=1e-3)
+
+
+def _legacy_smorph(path: Path, **meta) -> Path:
+    """Write a project.json in the pre-loop_mode schema (a plain `loop` boolean)."""
+    base = {
+        "version": 1,
+        "sample_rate": 44100,
+        "bit_depth": 16,
+        "name_a": "a.wav",
+        "name_b": "b.wav",
+        "steps": 4,
+        "algorithm": "Crossfade",
+        "bpm": 130,
+        "beats_per_step": 2,
+        "step_count": 0,
+    }
+    base.update(meta)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("project.json", json.dumps(base))
+    return path
+
+
+@pytest.mark.parametrize(
+    "legacy_loop, expected",
+    [(True, "loop"), (False, "off")],
+)
+def test_load_migrates_legacy_loop_flag(tmp_path, legacy_loop, expected):
+    """Projects saved before loop_mode existed must still open correctly."""
+    path = _legacy_smorph(tmp_path / "old.smorph", loop=legacy_loop)
+    loaded = ProjectFile.load(str(path))
+    assert loaded.loop_mode == expected
+    assert loaded.reverse is False
+    assert loaded.bpm == 130
+
+
+def test_load_defaults_when_loop_is_absent_entirely(tmp_path):
+    path = _legacy_smorph(tmp_path / "older.smorph")
+    loaded = ProjectFile.load(str(path))
+    assert loaded.loop_mode == "off"
 
 
 def test_load_missing_file():
