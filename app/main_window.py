@@ -87,6 +87,20 @@ class MainWindow(QMainWindow):
 
         project_menu = mb.addMenu("Project")
         project_menu.addAction("Project Settings…")
+        project_menu.addSeparator()
+        self._act_dither = project_menu.addAction("Dither 16-bit Exports")
+        self._act_dither.setCheckable(True)
+        self._act_dither.setChecked(
+            self._settings.value("export/dither", True, type=bool)
+        )
+        self._act_dither.setToolTip(
+            "Add TPDF dither when exporting at 16 bit. Leave on for finished "
+            "files; turn off when the steps feed further processing, so dither "
+            "is applied only once at the end."
+        )
+        self._act_dither.toggled.connect(
+            lambda on: self._settings.setValue("export/dither", on)
+        )
 
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Manage Plugins…")
@@ -224,6 +238,23 @@ class MainWindow(QMainWindow):
             "before morphing. Helps when A and B have different tempos or timing."
         )
         row.addWidget(self.chk_dtw)
+
+        self.chk_level_match = QCheckBox("Level Match")
+        self.chk_level_match.setChecked(True)
+        self.chk_level_match.setToolTip(
+            "Scale every step so its loudness follows a straight line from A to B. "
+            "Without it, intermediate steps sound thinner than the endpoints."
+        )
+        row.addWidget(self.chk_level_match)
+
+        self.chk_stretch = QCheckBox("Stretch to Fit")
+        self.chk_stretch.setToolTip(
+            "When A and B have different lengths, time-stretch the shorter one "
+            "to match instead of padding it with silence. Pitch is preserved. "
+            "Without this, the morph spends the length difference with nothing "
+            "left of the shorter sound."
+        )
+        row.addWidget(self.chk_stretch)
 
         row.addStretch()
         outer.addLayout(row)
@@ -473,6 +504,8 @@ class MainWindow(QMainWindow):
             sample_rate=self.project.sample_rate,
             params=self._param_panel.get_params(),
             dtw=self.chk_dtw.isChecked(),
+            level_match=self.chk_level_match.isChecked(),
+            stretch_to_fit=self.chk_stretch.isChecked(),
         )
 
     def _on_morph_progress(self, value: int) -> None:
@@ -676,6 +709,7 @@ class MainWindow(QMainWindow):
             output_dir=folder,
             sample_rate=self.project.sample_rate,
             bit_depth=self.project.bit_depth,
+            dither=self._act_dither.isChecked(),
         )
 
     def _on_export_progress(self, value: int) -> None:

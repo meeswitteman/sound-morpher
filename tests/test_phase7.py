@@ -157,7 +157,7 @@ def test_param_panel_loads_crossfade(qt_app):
     panel.load_plugin(CrossfadePlugin())
     params = panel.get_params()
     assert "curve" in params
-    assert params["curve"] == "linear"
+    assert params["curve"] == "equal-power"
 
 
 def test_param_panel_loads_spectral_fft(qt_app):

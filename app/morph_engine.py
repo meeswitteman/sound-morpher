@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
-from plugins.base import MorphPlugin, dtw_align
+from plugins.base import MorphPlugin, dtw_align, match_lengths, match_step_loudness
 
 
 class _Signals(QObject):
@@ -25,6 +25,8 @@ class _Worker(QRunnable):
         sample_rate: int,
         params: dict[str, Any],
         dtw: bool = False,
+        level_match: bool = True,
+        stretch_to_fit: bool = False,
     ) -> None:
         super().__init__()
         self.signals = _Signals()
@@ -35,12 +37,19 @@ class _Worker(QRunnable):
         self._sample_rate = sample_rate
         self._params = params
         self._dtw = dtw
+        self._level_match = level_match
+        self._stretch_to_fit = stretch_to_fit
         self.setAutoDelete(True)
 
     def run(self) -> None:
         try:
             self.signals.progress.emit(0)
             a, b = self._audio_a, self._audio_b
+            # Length matching happens here rather than inside each plugin so the
+            # user's choice applies uniformly. Plugins still call match_lengths()
+            # themselves; by then it is a no-op.
+            if self._stretch_to_fit:
+                a, b = match_lengths(a, b, mode="stretch")
             if self._dtw:
                 a, b = dtw_align(a, b, self._sample_rate)
 
@@ -61,6 +70,10 @@ class _Worker(QRunnable):
                 raise ValueError(
                     f"Plugin '{self._plugin.name}' returned {len(result)} steps, "
                     f"expected {steps}"
+                )
+            if self._level_match:
+                result = match_step_loudness(
+                    result, a, b, sample_rate=self._sample_rate
                 )
             self.signals.finished.emit(result)
         except Exception as exc:
@@ -95,6 +108,8 @@ class MorphEngine(QObject):
         sample_rate: int,
         params: dict[str, Any] | None = None,
         dtw: bool = False,
+        level_match: bool = True,
+        stretch_to_fit: bool = False,
     ) -> None:
         """Start async morph computation. Emits finished() or error() when done."""
         if self._active:
@@ -104,7 +119,17 @@ class MorphEngine(QObject):
         self._generation += 1
         gen = self._generation
 
-        worker = _Worker(plugin, audio_a, audio_b, steps, sample_rate, params or {}, dtw=dtw)
+        worker = _Worker(
+            plugin,
+            audio_a,
+            audio_b,
+            steps,
+            sample_rate,
+            params or {},
+            dtw=dtw,
+            level_match=level_match,
+            stretch_to_fit=stretch_to_fit,
+        )
         worker.signals.progress.connect(self.progress)
         worker.signals.finished.connect(lambda result, g=gen: self._on_finished(result, g))
         worker.signals.error.connect(lambda msg, g=gen: self._on_error(msg, g))

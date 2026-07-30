@@ -8,6 +8,31 @@ import sounddevice as sd
 import soundfile as sf
 
 
+def _resample(audio: np.ndarray, src_sr: int, target_sr: int) -> np.ndarray:
+    """Sample-rate conversion, best available quality.
+
+    scipy.signal.resample — the previous choice — works by zeroing out FFT bins,
+    which assumes the signal is periodic over its whole length. Samples are not:
+    the discontinuity between the last sample and the first rings out as a
+    pre-echo at the head and a smear at the tail. soxr is a proper polyphase
+    resampler with no such assumption, and it is already a librosa dependency.
+    """
+    try:
+        import soxr
+        return soxr.resample(audio, src_sr, target_sr, quality="VHQ").astype(np.float32)
+    except ImportError:
+        pass
+
+    # Rational polyphase: still no periodicity assumption, just a coarser filter.
+    from math import gcd
+    import scipy.signal as sig
+
+    divisor = gcd(int(src_sr), int(target_sr))
+    return sig.resample_poly(
+        audio, int(target_sr) // divisor, int(src_sr) // divisor, axis=0
+    ).astype(np.float32)
+
+
 class AudioEngine:
     """Load and play WAV audio. Thread-safe playback control."""
 
@@ -45,12 +70,8 @@ class AudioEngine:
         target_channels: int = 2,
     ) -> np.ndarray:
         """Resample and adjust channel count to match project settings."""
-        import scipy.signal as sig
-
-        # Resample if needed
         if src_sr != target_sr:
-            num_samples = int(len(audio) * target_sr / src_sr)
-            audio = sig.resample(audio, num_samples, axis=0)
+            audio = _resample(audio, src_sr, target_sr)
 
         # Channel conversion
         if audio.shape[1] == 1 and target_channels == 2:

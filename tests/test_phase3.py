@@ -56,9 +56,19 @@ def test_crossfade_midpoint():
     plugin = CrossfadePlugin()
     a = _stereo(100, 2.0)
     b = _stereo(100, 0.0)
-    steps = plugin.morph(a, b, steps=3, sample_rate=44100)
+    steps = plugin.morph(a, b, steps=3, sample_rate=44100, curve="linear")
     # Middle step: t=0.5 → 0.5*2 + 0.5*0 = 1.0
     np.testing.assert_allclose(steps[1], np.full((100, 2), 1.0, dtype=np.float32), atol=1e-5)
+
+
+def test_crossfade_default_curve_is_equal_power():
+    plugin = CrossfadePlugin()
+    a = _stereo(100, 2.0)
+    b = _stereo(100, 0.0)
+    steps = plugin.morph(a, b, steps=3, sample_rate=44100)
+    # Equal-power midpoint: cos(pi/4) * 2 = sqrt(2)
+    expected = np.full((100, 2), np.sqrt(2.0), dtype=np.float32)
+    np.testing.assert_allclose(steps[1], expected, atol=1e-5)
 
 
 def test_crossfade_equal_power():

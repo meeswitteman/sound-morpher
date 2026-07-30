@@ -11,7 +11,9 @@ A desktop application for morphing between two audio samples in configurable dis
 - **7 morphing algorithms** — from simple crossfade to WORLD vocoder and Griffin-Lim
 - **Spectrogram thumbnails** per morph step, computed on the fly
 - **BPM-synchronized playback** with tap tempo and loop toggle
-- **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing
+- **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing, time-stretched through a phase vocoder so the alignment does not move either sound's pitch
+- **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints, with a look-ahead limiter catching any remaining peaks
+- **Stretch to Fit** — time-stretch the shorter source to match the longer one instead of padding it with silence
 - **Live recording** — record directly into a source slot (mic or line-in)
 - **Trim & volume** controls per source slot
 - **Project files** — save and reload full sessions as `.smorph`
@@ -24,13 +26,70 @@ A desktop application for morphing between two audio samples in configurable dis
 
 | Plugin | Best for |
 |--------|----------|
-| **Crossfade** | Everything — simple linear or equal-power volume blend |
+| **Crossfade** | Everything — equal-power (default) or linear volume blend |
 | **Spectral FFT** | Textures and atmospheric sounds — interpolates STFT magnitude and phase |
-| **Pitch Shift** | Melodic samples — shifts pitch while preserving timbre |
-| **Granular** | Atmospheric morphs — blends overlapping grains from both sources |
-| **Vocoder (LPC)** | Broadband audio — interpolates LPC spectral envelopes frame by frame |
+| **Pitch Shift** | Melodic samples — moves both sounds onto a common interpolated pitch, then crossfades |
+| **Granular** | Atmospheric morphs — rebuilds the sound from grains scattered between A and B, with position and pitch jitter |
+| **Vocoder (LPC)** | Broadband audio — interpolates LPC spectral envelopes frame by frame via Line Spectral Frequencies |
 | **WORLD Vocoder** | Voices and monophonic melodic samples — interpolates F0, spectral envelope, and aperiodicity using the WORLD speech synthesis framework |
 | **Griffin-Lim** | Experimental / sci-fi textures — interpolates magnitude spectra and reconstructs phase via Griffin-Lim iteration |
+
+### Magnitude and Phase modes
+
+The spectral plugins (Spectral FFT, Griffin-Lim, WORLD Vocoder) expose how the
+two spectra are combined:
+
+- **Magnitude — `log`** (default) blends geometrically, so a partial present in A
+  fades out as B's fades in. **`linear`** blends arithmetically, which leaves both
+  spectra audible side by side: a spectral crossfade rather than a morph.
+- **Phase — `shortest-arc`** (default) rotates A's phase toward B the short way
+  round the circle. **`dominant`** takes the phase of the higher-weighted source.
+  **`linear`** is the naive average; it averages straight through the ±π wrap and
+  cancels partials that should reinforce, and is kept only for comparison.
+
+Because geometric blending is quieter than arithmetic blending, leave **Level
+Match** on when using `log`.
+
+### Level Match and peaks
+
+After each step is scaled onto the loudness curve, peaks are handled in two
+stages. A single shared gain comes first, up to 3 dB, because one gain across the
+whole set is transparent and keeps the relative levels intact. Beyond that a
+shared trim would be the wrong tool — one overshooting transient, which spectral
+reconstruction readily produces, would drag the entire sequence down with it. So
+anything still over the ceiling goes to a look-ahead limiter, which only acts
+where and when it has to. On a source pushed 10 dB into the limiter, that is
+worth about 8 dB of output level over a shared trim.
+
+### Pitch tracking
+
+Pitch Shift takes a **Tracking** setting. `median` (default) finds one
+representative pitch per sound and shifts by a constant interval — robust, and
+the right choice for single-note samples. `dynamic` follows each sound's pitch
+contour over time, so a melody or a vibrato morphs into the other's; it is the
+better answer whenever the pitch actually moves, but detection is unreliable on
+inharmonic or noisy material and the contour then warbles. On the bundled bell
+samples, for instance, tracking spreads over a 2.6× range with several octave
+jumps, which `median` sidesteps entirely.
+
+### Channels
+
+Both vocoders take a **Channels** setting. `stereo` (default) analyses and
+synthesises each channel so the stereo image survives; the WORLD vocoder shares
+one pitch track across channels, since estimating F0 per channel lets them drift
+apart into a chorus. `mono` downmixes first and is roughly twice as fast.
+
+---
+
+## Export
+
+Steps are written as `morph_step_01.wav` … `morph_step_NN.wav` at the project's
+sample rate and bit depth. 16-bit exports get TPDF dither, which turns the
+quantiser's signal-dependent distortion into an ordinary noise floor — most
+audible on the fades and tails a morph sequence is full of. Toggle it under
+**Project → Dither 16-bit Exports**; turn it off when the steps feed further
+processing, so dither is applied only once at the very end. 24-bit exports are
+never dithered, as the quantisation already sits below anything audible.
 
 ---
 
