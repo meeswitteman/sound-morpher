@@ -11,6 +11,9 @@ Each test pins down a defect that was measured on the pre-fix code:
   * DTW alignment resampled the signal, sliding its pitch with the warp path
   * 16-bit export quantised without dither
   * Pitch Shift moved only A, leaving two pitches sounding at once
+  * one overshooting transient dragged the level of the whole sequence down
+  * FFT-based resampling rang at the edges of every sample it converted
+  * unequal-length sources were padded with silence rather than fitted
 """
 
 from __future__ import annotations
@@ -23,7 +26,9 @@ from plugins.base import (
     interp_lpc,
     interp_magnitude,
     interp_phase,
+    limit_peaks,
     lpc_to_lsf,
+    match_lengths,
     pitch_shift_varying,
     lsf_to_lpc,
     match_step_loudness,
@@ -844,6 +849,186 @@ def test_export_skips_dither_at_24_bit(tmp_path):
     _ExportWorker(silence, out, SR, 24, dither=True).run()
     data, _ = sf.read(str(out / "morph_step_01.wav"), always_2d=True)
     assert float(np.max(np.abs(data))) == 0.0
+
+
+# ── Limiter ───────────────────────────────────────────────────────────────────
+
+def test_limiter_never_leaves_anything_above_the_ceiling():
+    rng = np.random.default_rng(40)
+    sig = (rng.standard_normal((SR // 2, 2)) * 0.5).astype(np.float32)
+    sig[1000] = 4.0            # a single wild transient
+    sig[20000:20100] = 2.5     # and a sustained overshoot
+
+    out = limit_peaks(sig, SR, ceiling=0.9)
+    assert float(np.max(np.abs(out))) <= 0.9 + 1e-6
+
+
+def test_limiter_leaves_quiet_passages_untouched():
+    """Gain reduction should happen where it is needed and nowhere else."""
+    sig = np.full((SR, 1), 0.2, dtype=np.float32)
+    sig[SR // 2] = 2.0
+
+    out = limit_peaks(sig, SR, ceiling=0.9, window_ms=5.0)
+    far_from_peak = out[: SR // 4]
+    np.testing.assert_allclose(far_from_peak, sig[: SR // 4], rtol=1e-5)
+
+
+def test_limiter_gain_curve_is_smooth_not_a_clip():
+    """Clipping bends the waveform at a corner; the limiter rides a gain curve."""
+    t = np.arange(SR // 4) / SR
+    sig = (2.0 * np.sin(2 * np.pi * 300 * t)).astype(np.float32).reshape(-1, 1)
+
+    limited = limit_peaks(sig, SR, ceiling=0.9)
+    clipped = np.clip(sig, -0.9, 0.9)
+
+    def harmonic_distortion(x):
+        spec = np.abs(np.fft.rfft(x.ravel() * np.hanning(len(x))))
+        freqs = np.fft.rfftfreq(len(x), 1 / SR)
+        fund = spec[np.argmin(np.abs(freqs - 300))]
+        harm = max(spec[np.argmin(np.abs(freqs - f))] for f in (900.0, 1500.0, 2100.0))
+        return harm / fund
+
+    assert harmonic_distortion(limited) < harmonic_distortion(clipped) / 10
+
+
+def test_limiter_preserves_the_stereo_image():
+    """Gain comes from the loudest channel, so the balance cannot shift."""
+    sig = np.zeros((SR // 4, 2), dtype=np.float32)
+    sig[:, 0] = 0.8
+    sig[:, 1] = 0.4
+    sig[5000, 0] = 3.0
+
+    out = limit_peaks(sig, SR, ceiling=0.9)
+    quiet = out[SR // 8 :]
+    assert _rms(quiet[:, 0]) / _rms(quiet[:, 1]) == pytest.approx(2.0, rel=1e-3)
+
+
+def test_limiter_is_a_no_op_below_the_ceiling():
+    sig = (np.full((1000, 1), 0.5)).astype(np.float32)
+    np.testing.assert_array_equal(limit_peaks(sig, SR, ceiling=0.9), sig)
+
+
+def test_level_match_bounds_the_shared_trim():
+    """One rogue transient must not drag the whole sequence down with it."""
+    a = np.full((SR // 4, 1), 0.5, dtype=np.float32)
+    b = np.full((SR // 4, 1), 0.5, dtype=np.float32)
+    steps = [np.full((SR // 4, 1), 0.5, dtype=np.float32) for _ in range(3)]
+    steps[1] = steps[1].copy()
+    steps[1][100] = 6.0        # +22 dB overshoot on one sample
+
+    matched = match_step_loudness(steps, a, b, sample_rate=SR)
+
+    assert max(float(np.max(np.abs(s))) for s in matched) <= 0.99 + 1e-6
+    # The shared trim is capped at 3 dB; the rest is the limiter's job, so the
+    # steady level of the untouched steps stays close to where it was.
+    assert _rms(matched[0]) > 0.5 * 10 ** (-3.5 / 20)
+
+
+def test_level_match_still_uses_the_shared_trim_for_small_overshoots():
+    """Under 3 dB a single gain is transparent, so no limiting should happen."""
+    a = np.full((1000, 1), 0.8, dtype=np.float32)
+    b = np.full((1000, 1), 0.8, dtype=np.float32)
+    steps = [np.full((1000, 1), 1.2, dtype=np.float32) for _ in range(3)]
+
+    matched = match_step_loudness(steps, a, b, sample_rate=SR)
+    for s in matched:
+        assert float(np.max(np.abs(s))) <= 0.99 + 1e-6
+        # A pure gain change: every sample still identical to every other.
+        assert float(np.std(s)) == pytest.approx(0.0, abs=1e-6)
+
+
+# ── Resampling ────────────────────────────────────────────────────────────────
+
+def test_resample_hits_the_target_rate_and_length():
+    from app.audio_engine import _resample
+
+    sig = _harmonic(440.0, 1.0)
+    out = _resample(sig, 44100, 48000)
+    assert abs(len(out) - 48000) <= 2
+    assert out.shape[1] == 1
+
+    # Measure at the *output* rate — the whole point is that 440 Hz stays 440 Hz.
+    spec = np.abs(np.fft.rfft(out.ravel() * np.hanning(len(out))))
+    freqs = np.fft.rfftfreq(len(out), 1 / 48000)
+    band = (freqs > 300) & (freqs < 600)
+    assert float(freqs[band][np.argmax(spec[band])]) == pytest.approx(440.0, rel=0.02)
+
+
+def test_resample_does_not_ring_at_the_edges():
+    """scipy.signal.resample assumes periodicity; a step across the wrap rang."""
+    from app.audio_engine import _resample
+
+    # Loud at the start, silent at the end: a big discontinuity across the wrap.
+    sig = np.zeros((44100, 1), dtype=np.float32)
+    sig[:4410] = 0.8
+
+    out = _resample(sig, 44100, 22050)
+    tail = out[int(len(out) * 0.6) :]
+    # The silent tail must stay silent instead of picking up the head's energy.
+    assert float(np.max(np.abs(tail))) < 1e-3
+
+
+def test_resample_preserves_channels():
+    from app.audio_engine import _resample
+
+    sig = np.repeat(_harmonic(440.0, 0.5), 2, axis=1).copy()
+    out = _resample(sig, 44100, 22050)
+    assert out.shape[1] == 2
+    assert np.all(np.isfinite(out))
+
+
+# ── match_lengths ─────────────────────────────────────────────────────────────
+
+def test_match_lengths_pad_is_still_the_default():
+    a = np.full((100, 2), 1.0, dtype=np.float32)
+    b = np.full((160, 2), 1.0, dtype=np.float32)
+    out_a, out_b = match_lengths(a, b)
+    assert out_a.shape == out_b.shape == (160, 2)
+    assert float(np.max(np.abs(out_a[100:]))) == 0.0      # padded with silence
+
+
+def test_match_lengths_stretch_fills_the_whole_duration():
+    a = _harmonic(300.0, 0.5)
+    b = _harmonic(300.0, 1.5)
+
+    out_a, out_b = match_lengths(a, b, mode="stretch")
+    assert len(out_a) == len(out_b) == len(b)
+
+    # Unlike padding, the stretched A has content right to the end.
+    padded_a, _ = match_lengths(a, b)
+    tail = slice(int(len(b) * 0.8), None)
+    assert _rms(out_a[tail]) > 0.05
+    assert _rms(padded_a[tail]) == 0.0
+
+
+def test_match_lengths_stretch_preserves_pitch():
+    a = _harmonic(300.0, 0.5)
+    b = _harmonic(300.0, 1.5)
+    out_a, _ = match_lengths(a, b, mode="stretch")
+    assert _fundamental(out_a, 150.0, 600.0) == pytest.approx(300.0, rel=0.03)
+
+
+def test_match_lengths_stretch_keeps_channels_and_equal_lengths_untouched():
+    a = np.repeat(_harmonic(300.0, 0.4), 2, axis=1).copy()
+    b = np.repeat(_harmonic(300.0, 0.9), 2, axis=1).copy()
+
+    out_a, out_b = match_lengths(a, b, mode="stretch")
+    assert out_a.shape == out_b.shape == (len(b), 2)
+    assert np.all(np.isfinite(out_a))
+
+    same_a, same_b = match_lengths(b, b, mode="stretch")
+    np.testing.assert_array_equal(same_a, b)
+    np.testing.assert_array_equal(same_b, b)
+
+
+def test_match_lengths_stretches_whichever_side_is_shorter():
+    long_sig = _harmonic(300.0, 1.2)
+    short_sig = _harmonic(300.0, 0.4)
+
+    out_a, out_b = match_lengths(long_sig, short_sig, mode="stretch")
+    assert len(out_a) == len(out_b) == len(long_sig)
+    np.testing.assert_array_equal(out_a, long_sig)    # the longer one is untouched
+    assert _rms(out_b[int(len(out_b) * 0.8) :]) > 0.05
 
 
 # ── match_step_loudness ───────────────────────────────────────────────────────

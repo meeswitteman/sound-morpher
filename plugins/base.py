@@ -214,6 +214,8 @@ def match_step_loudness(
     audio_b: np.ndarray,
     max_gain_db: float = 12.0,
     ceiling: float = 0.99,
+    max_trim_db: float = 3.0,
+    sample_rate: int = 44100,
 ) -> list[np.ndarray]:
     """Scale each step so its RMS tracks a straight line from A's RMS to B's.
 
@@ -222,8 +224,13 @@ def match_step_loudness(
     steps arrive audibly thinner than the endpoints. This restores the intended
     loudness curve.
 
-    A single shared gain is applied afterwards if any step exceeds `ceiling`, so
-    the relative levels across the sequence are preserved.
+    Peaks are then handled in two stages. First a single shared gain, up to
+    `max_trim_db`, because one gain across the whole set is transparent and keeps
+    the relative levels intact. Beyond that a shared trim would be the wrong tool:
+    a single overshooting transient — which spectral reconstruction readily
+    produces — would drag the entire sequence down with it. Whatever still pokes
+    over the ceiling is caught by a look-ahead limiter instead, which only acts
+    where and when it has to.
     """
     if not steps:
         return steps
@@ -246,10 +253,65 @@ def match_step_loudness(
 
     peak = max((float(np.max(np.abs(s))) for s in scaled), default=0.0)
     if peak > ceiling:
-        trim = ceiling / peak
+        trim = max(ceiling / peak, 10.0 ** (-max_trim_db / 20.0))
         scaled = [(s * trim).astype(np.float32) for s in scaled]
+        if peak * trim > ceiling:
+            scaled = [limit_peaks(s, sample_rate, ceiling) for s in scaled]
 
     return scaled
+
+
+def limit_peaks(
+    audio: np.ndarray,
+    sample_rate: int,
+    ceiling: float = 0.99,
+    window_ms: float = 5.0,
+) -> np.ndarray:
+    """Look-ahead peak limiter. Returns `audio` with nothing above `ceiling`.
+
+    Hard clipping generates broadband harmonics at full level; riding a smooth
+    gain curve instead makes the reduction inaudible. Two steps:
+
+    1. A *running minimum* of the required gain over ±W samples. The reduction is
+       therefore already in force when the transient arrives, instead of catching
+       up after it — that is what "look-ahead" means here.
+    2. Two boxcar passes, giving a triangular smoothing kernel of half-width ≤ W,
+       to round off the corners the running minimum leaves behind.
+
+    Keeping the smoothing half-width inside the minimum's is what makes the
+    ceiling a guarantee rather than a target: every sample the kernel averages
+    over is itself ≤ the gain required at the centre, so the smoothed gain cannot
+    exceed it either. No clamp afterwards, and therefore no reintroduced corners.
+
+    The curve is symmetric — equal attack and release. Real-time limiters use a
+    longer release to avoid pumping, but at these window lengths, offline, there
+    is nothing to hear.
+
+    Gain is derived from the loudest channel, so limiting cannot shift the stereo
+    image.
+    """
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+
+    arr = audio.astype(np.float32)
+    flat = arr.ndim == 1
+    if flat:
+        arr = arr.reshape(-1, 1)
+
+    envelope = np.max(np.abs(arr), axis=1)
+    if envelope.size == 0 or float(envelope.max()) <= ceiling:
+        return audio.astype(np.float32)
+
+    required = np.minimum(1.0, ceiling / np.maximum(envelope, 1e-12))
+
+    w = max(1, int(sample_rate * window_ms / 1000))
+    gain = minimum_filter1d(required, size=2 * w + 1, mode="nearest")
+
+    smooth = max(1, w // 2)
+    gain = uniform_filter1d(gain, size=smooth, mode="nearest")
+    gain = uniform_filter1d(gain, size=smooth, mode="nearest")
+
+    out = arr * gain[:, np.newaxis]
+    return (out.ravel() if flat else out).astype(np.float32)
 
 
 def _rms(audio: np.ndarray) -> float:
@@ -263,24 +325,42 @@ def _rms(audio: np.ndarray) -> float:
 def match_lengths(
     a: np.ndarray,
     b: np.ndarray,
+    mode: str = "pad",
+    hop_length: int = 512,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Zero-pad the shorter array so both have the same number of frames."""
+    """Make both arrays the same number of frames.
+
+    "pad" (default) zero-pads the shorter one. Cheap and lossless, but the morph
+    then spends the difference in silence: a one-second A against a three-second
+    B gives two seconds where there is nothing left of A to morph.
+
+    "stretch" time-stretches the shorter one to fit, through the phase vocoder,
+    so its whole gesture lines up against B's for the entire duration. Pitch is
+    preserved; heavy ratios sound processed, as any time-stretch does.
+    """
     len_a, len_b = len(a), len(b)
     if len_a == len_b:
         return a, b
     target = max(len_a, len_b)
     channels = a.shape[1] if a.ndim == 2 else 1
 
-    def _pad(arr: np.ndarray, target_len: int) -> np.ndarray:
-        pad_frames = target_len - len(arr)
-        padding = np.zeros((pad_frames, channels), dtype=arr.dtype)
+    def _pad(arr: np.ndarray) -> np.ndarray:
+        padding = np.zeros((target - len(arr), channels), dtype=arr.dtype)
         return np.concatenate([arr, padding], axis=0)
 
+    def _stretch(arr: np.ndarray) -> np.ndarray:
+        src = np.linspace(0.0, len(arr) - 1.0, target)
+        is_2d = arr.ndim == 2
+        cols = [
+            _stretch_to_time_map(arr[:, ch] if is_2d else arr, src, hop_length)
+            for ch in range(channels)
+        ]
+        return np.stack(cols, axis=1) if is_2d else cols[0]
+
+    fit = _stretch if mode == "stretch" else _pad
     if len_a < target:
-        a = _pad(a, target)
-    else:
-        b = _pad(b, target)
-    return a, b
+        return fit(a), b
+    return a, fit(b)
 
 
 def dtw_align(

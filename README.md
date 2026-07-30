@@ -12,7 +12,8 @@ A desktop application for morphing between two audio samples in configurable dis
 - **Spectrogram thumbnails** per morph step, computed on the fly
 - **BPM-synchronized playback** with tap tempo and loop toggle
 - **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing, time-stretched through a phase vocoder so the alignment does not move either sound's pitch
-- **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints
+- **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints, with a look-ahead limiter catching any remaining peaks
+- **Stretch to Fit** — time-stretch the shorter source to match the longer one instead of padding it with silence
 - **Live recording** — record directly into a source slot (mic or line-in)
 - **Trim & volume** controls per source slot
 - **Project files** — save and reload full sessions as `.smorph`
@@ -48,6 +49,17 @@ two spectra are combined:
 
 Because geometric blending is quieter than arithmetic blending, leave **Level
 Match** on when using `log`.
+
+### Level Match and peaks
+
+After each step is scaled onto the loudness curve, peaks are handled in two
+stages. A single shared gain comes first, up to 3 dB, because one gain across the
+whole set is transparent and keeps the relative levels intact. Beyond that a
+shared trim would be the wrong tool — one overshooting transient, which spectral
+reconstruction readily produces, would drag the entire sequence down with it. So
+anything still over the ceiling goes to a look-ahead limiter, which only acts
+where and when it has to. On a source pushed 10 dB into the limiter, that is
+worth about 8 dB of output level over a shared trim.
 
 ### Pitch tracking
 

@@ -247,6 +247,15 @@ class MainWindow(QMainWindow):
         )
         row.addWidget(self.chk_level_match)
 
+        self.chk_stretch = QCheckBox("Stretch to Fit")
+        self.chk_stretch.setToolTip(
+            "When A and B have different lengths, time-stretch the shorter one "
+            "to match instead of padding it with silence. Pitch is preserved. "
+            "Without this, the morph spends the length difference with nothing "
+            "left of the shorter sound."
+        )
+        row.addWidget(self.chk_stretch)
+
         row.addStretch()
         outer.addLayout(row)
 
@@ -496,6 +505,7 @@ class MainWindow(QMainWindow):
             params=self._param_panel.get_params(),
             dtw=self.chk_dtw.isChecked(),
             level_match=self.chk_level_match.isChecked(),
+            stretch_to_fit=self.chk_stretch.isChecked(),
         )
 
     def _on_morph_progress(self, value: int) -> None:
