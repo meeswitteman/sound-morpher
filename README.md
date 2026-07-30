@@ -27,7 +27,7 @@ A desktop application for morphing between two audio samples in configurable dis
 |--------|----------|
 | **Crossfade** | Everything — equal-power (default) or linear volume blend |
 | **Spectral FFT** | Textures and atmospheric sounds — interpolates STFT magnitude and phase |
-| **Pitch Shift** | Melodic samples — shifts pitch while preserving timbre |
+| **Pitch Shift** | Melodic samples — moves both sounds onto a common interpolated pitch, then crossfades |
 | **Granular** | Atmospheric morphs — rebuilds the sound from grains scattered between A and B, with position and pitch jitter |
 | **Vocoder (LPC)** | Broadband audio — interpolates LPC spectral envelopes frame by frame via Line Spectral Frequencies |
 | **WORLD Vocoder** | Voices and monophonic melodic samples — interpolates F0, spectral envelope, and aperiodicity using the WORLD speech synthesis framework |
@@ -48,6 +48,17 @@ two spectra are combined:
 
 Because geometric blending is quieter than arithmetic blending, leave **Level
 Match** on when using `log`.
+
+### Pitch tracking
+
+Pitch Shift takes a **Tracking** setting. `median` (default) finds one
+representative pitch per sound and shifts by a constant interval — robust, and
+the right choice for single-note samples. `dynamic` follows each sound's pitch
+contour over time, so a melody or a vibrato morphs into the other's; it is the
+better answer whenever the pitch actually moves, but detection is unreliable on
+inharmonic or noisy material and the contour then warbles. On the bundled bell
+samples, for instance, tracking spreads over a 2.6× range with several octave
+jumps, which `median` sidesteps entirely.
 
 ### Channels
 

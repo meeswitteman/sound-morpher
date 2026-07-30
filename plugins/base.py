@@ -394,6 +394,46 @@ def _stretch_to_time_map(
     return out.astype(np.float32)
 
 
+def pitch_shift_varying(
+    signal: np.ndarray,
+    ratio: np.ndarray,
+    hop_length: int = 512,
+) -> np.ndarray:
+    """Pitch-shift a mono signal by a per-sample frequency `ratio`, keeping its length.
+
+    librosa.effects.pitch_shift only takes a constant number of semitones, which
+    is no use when the target pitch is itself a moving contour.
+
+    Works the standard way round: playing the signal back at speed `ratio` gives
+    the right pitch but the wrong duration, so the source is first time-stretched
+    by the inverse amount — through the phase vocoder, which changes duration
+    without touching pitch — and the varispeed read then lands back on the
+    original timing.
+    """
+    n = len(signal)
+    ratio = np.asarray(ratio, dtype=np.float64)
+    if n < 2 or np.allclose(ratio, 1.0):
+        return signal.astype(np.float32).copy()
+
+    # Where a varispeed read would land after each output sample.
+    read = np.concatenate([[0.0], np.cumsum(ratio)[:-1]])
+    n_stretched = int(np.ceil(read[-1])) + 2
+    if n_stretched < 2:
+        return signal.astype(np.float32).copy()
+
+    # Inverse map: which source sample each stretched sample should come from.
+    src = np.interp(
+        np.arange(n_stretched, dtype=np.float64), read, np.arange(n, dtype=np.float64)
+    )
+    stretched = _stretch_to_time_map(signal, src, hop_length)
+
+    idx = np.clip(read, 0.0, len(stretched) - 1.0)
+    lo = np.floor(idx).astype(np.int64)
+    hi = np.minimum(lo + 1, len(stretched) - 1)
+    frac = idx - lo
+    return (stretched[lo] * (1.0 - frac) + stretched[hi] * frac).astype(np.float32)
+
+
 def _phase_vocoder(
     D: np.ndarray,
     time_map: np.ndarray,

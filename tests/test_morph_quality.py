@@ -10,6 +10,7 @@ Each test pins down a defect that was measured on the pre-fix code:
   * blending LPC coefficients directly produced unstable synthesis filters
   * DTW alignment resampled the signal, sliding its pitch with the warp path
   * 16-bit export quantised without dither
+  * Pitch Shift moved only A, leaving two pitches sounding at once
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from plugins.base import (
     interp_magnitude,
     interp_phase,
     lpc_to_lsf,
+    pitch_shift_varying,
     lsf_to_lpc,
     match_step_loudness,
 )
@@ -525,6 +527,160 @@ def test_world_vocoder_channels_share_one_pitch_track():
         return float(np.fft.rfftfreq(len(sig), 1 / SR)[np.argmax(spec)])
 
     assert dominant(mid[:, 0]) == pytest.approx(dominant(mid[:, 1]), abs=1.0)
+
+
+# ── Pitch Shift ───────────────────────────────────────────────────────────────
+
+def _harmonic(freq: float, seconds: float = 1.0, amp: float = 0.4, sweep_to=None):
+    """A tone with a few harmonics, so pitch detection has something to lock to."""
+    n = int(SR * seconds)
+    t = np.arange(n) / SR
+    if sweep_to is None:
+        phase = 2 * np.pi * freq * t
+    else:
+        inst = freq * (sweep_to / freq) ** (t / seconds)
+        phase = 2 * np.pi * np.cumsum(inst) / SR
+    sig = sum(amp / (k + 1) * np.sin((k + 1) * phase) for k in range(4))
+    return sig.astype(np.float32).reshape(-1, 1)
+
+
+def _fundamental(sig: np.ndarray, fmin: float = 100.0, fmax: float = 900.0) -> float:
+    mono = sig.mean(axis=1) if sig.ndim == 2 else sig
+    spec = np.abs(np.fft.rfft(mono * np.hanning(len(mono))))
+    freqs = np.fft.rfftfreq(len(mono), 1 / SR)
+    band = (freqs > fmin) & (freqs < fmax)
+    return float(freqs[band][np.argmax(spec[band])])
+
+
+def _energy_at(sig: np.ndarray, freq: float) -> float:
+    mono = sig.mean(axis=1) if sig.ndim == 2 else sig
+    spec = np.abs(np.fft.rfft(mono * np.hanning(len(mono))))
+    freqs = np.fft.rfftfreq(len(mono), 1 / SR)
+    return float(spec[np.argmin(np.abs(freqs - freq))])
+
+
+def test_pitch_shift_midpoint_has_one_pitch_not_two():
+    """The defect: only A was shifted, so B's original pitch sounded alongside it."""
+    from plugins.pitch_shift import PitchShiftPlugin
+
+    a, b = _harmonic(220.0), _harmonic(330.0)
+    mid = PitchShiftPlugin().morph(a, b, steps=3, sample_rate=SR)[1]
+
+    target = 220.0 * np.sqrt(330.0 / 220.0)     # geometric midpoint, ~269 Hz
+    assert _fundamental(mid) == pytest.approx(target, rel=0.03)
+
+    # Neither endpoint pitch should still be sounding at the midpoint.
+    at_target = _energy_at(mid, target)
+    assert _energy_at(mid, 220.0) < at_target * 0.25
+    assert _energy_at(mid, 330.0) < at_target * 0.25
+
+
+def test_pitch_shift_interpolates_in_the_log_domain():
+    """Equal steps should be equal musical intervals, not equal numbers of hertz."""
+    from plugins.pitch_shift import PitchShiftPlugin
+
+    a, b = _harmonic(220.0), _harmonic(440.0)
+    steps = PitchShiftPlugin().morph(a, b, steps=5, sample_rate=SR)
+    pitches = [_fundamental(s, 150.0, 700.0) for s in steps]
+
+    for i, expected in enumerate(220.0 * 2 ** (np.arange(5) / 4)):
+        assert pitches[i] == pytest.approx(expected, rel=0.03)
+
+
+def test_pitch_shift_endpoints_are_bit_exact():
+    from plugins.pitch_shift import PitchShiftPlugin
+
+    a, b = _harmonic(220.0, 0.3), _harmonic(330.0, 0.3)
+    steps = PitchShiftPlugin().morph(a, b, steps=4, sample_rate=SR)
+    np.testing.assert_array_equal(steps[0], a)
+    np.testing.assert_array_equal(steps[-1], b)
+
+
+@pytest.mark.parametrize("tracking", ["median", "dynamic"])
+def test_pitch_shift_falls_back_to_crossfade_when_undetectable(tracking):
+    """Better an honest crossfade than a shift by a made-up interval.
+
+    Note this guard only catches outright detection *failure*. YIN returns some
+    value in range for any noisy input, so genuinely unpitched material still
+    takes the shifting path — it just gets shifted by an arbitrary interval.
+    """
+    from plugins.crossfade import CrossfadePlugin
+    from plugins.pitch_shift import PitchShiftPlugin
+
+    a = np.zeros((SR // 2, 1), dtype=np.float32)
+    b = _harmonic(330.0, 0.5)
+
+    steps = PitchShiftPlugin().morph(a, b, steps=3, sample_rate=SR, tracking=tracking)
+    fade = CrossfadePlugin().morph(a, b, steps=3, sample_rate=SR)
+    np.testing.assert_allclose(steps[1], fade[1], atol=1e-5)
+
+
+def test_pitch_shift_preserves_stereo():
+    from plugins.pitch_shift import PitchShiftPlugin
+
+    a = np.repeat(_harmonic(220.0, 0.5), 2, axis=1).copy()
+    b = np.repeat(_harmonic(330.0, 0.5), 2, axis=1).copy()
+    a[:, 1] *= 0.5
+    steps = PitchShiftPlugin().morph(a, b, steps=3, sample_rate=SR)
+    for s in steps:
+        assert s.shape == (a.shape[0], 2)
+        assert np.all(np.isfinite(s))
+    assert _rms(steps[1][:, 1]) < _rms(steps[1][:, 0]) * 0.95
+
+
+def test_pitch_shift_dynamic_follows_a_moving_contour():
+    """A sweeps, B is steady: the midpoint should sweep with it, not sit still."""
+    from plugins.pitch_shift import PitchShiftPlugin
+
+    a = _harmonic(200.0, 1.0, sweep_to=400.0)
+    b = _harmonic(300.0, 1.0)
+
+    mid = PitchShiftPlugin().morph(a, b, steps=3, sample_rate=SR, tracking="dynamic")[1]
+    head = _fundamental(mid[: SR // 4], 150.0, 700.0)
+    tail = _fundamental(mid[-SR // 4 :], 150.0, 700.0)
+    assert tail > head * 1.15
+
+    # Median mode cannot: one shift for the whole file, so the strongest pitch
+    # at the midpoint stays put rather than sweeping.
+    flat = PitchShiftPlugin().morph(a, b, steps=3, sample_rate=SR)[1]
+    flat_ratio = (
+        _fundamental(flat[-SR // 4 :], 150.0, 700.0)
+        / _fundamental(flat[: SR // 4], 150.0, 700.0)
+    )
+    assert flat_ratio == pytest.approx(1.0, abs=0.05)
+
+
+# ── pitch_shift_varying ───────────────────────────────────────────────────────
+
+def test_pitch_shift_varying_matches_a_constant_shift():
+    sig = _harmonic(300.0, 1.0).ravel()
+    up_a_fifth = np.full(len(sig), 1.5)
+    out = pitch_shift_varying(sig, up_a_fifth)
+    assert len(out) == len(sig)
+    assert _fundamental(out, 200.0, 900.0) == pytest.approx(450.0, rel=0.03)
+
+
+def test_pitch_shift_varying_is_identity_at_ratio_one():
+    sig = _harmonic(300.0, 0.3).ravel()
+    out = pitch_shift_varying(sig, np.ones(len(sig)))
+    np.testing.assert_array_equal(out, sig)
+
+
+def test_pitch_shift_varying_tracks_a_changing_ratio():
+    sig = _harmonic(300.0, 1.0).ravel()
+    ramp = np.linspace(1.0, 2.0, len(sig))
+    out = pitch_shift_varying(sig, ramp)
+    assert len(out) == len(sig)
+    head = _fundamental(out[: SR // 4], 200.0, 900.0)
+    tail = _fundamental(out[-SR // 4 :], 200.0, 900.0)
+    assert tail > head * 1.4
+
+
+def test_pitch_shift_varying_survives_a_very_short_signal():
+    sig = _harmonic(300.0, 0.005).ravel()
+    out = pitch_shift_varying(sig, np.full(len(sig), 1.2))
+    assert len(out) == len(sig)
+    assert np.all(np.isfinite(out))
 
 
 # ── DTW alignment ─────────────────────────────────────────────────────────────
