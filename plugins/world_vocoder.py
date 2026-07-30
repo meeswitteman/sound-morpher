@@ -61,6 +61,18 @@ class WorldVocoderPlugin(MorphPlugin):
                 "linear: both formant sets sound at once."
             ),
         ),
+        PluginParam(
+            name="channels",
+            label="Channels",
+            type="choice",
+            default="stereo",
+            choices=["stereo", "mono"],
+            tooltip=(
+                "stereo: per-channel envelope and aperiodicity on a shared pitch "
+                "track, preserving the stereo image.  "
+                "mono: downmix first — roughly twice as fast."
+            ),
+        ),
     ]
 
     def morph(
@@ -73,33 +85,44 @@ class WorldVocoderPlugin(MorphPlugin):
         f0_mode: str = "interpolate",
         frame_ms: float = 5.0,
         envelope: str = "log",
+        channels: str = "stereo",
         **_: Any,
     ) -> list[np.ndarray]:
         pw = _ensure_pyworld()
 
         a, b = match_lengths(audio_a, audio_b)
-        a_mono = _to_mono(a)
-        b_mono = _to_mono(b)
-        n_samples = len(a_mono)
+        a, b = _as_2d(a), _as_2d(b)
+        if channels == "mono":
+            a, b = _downmix(a), _downmix(b)
 
-        # WORLD analysis of both sources
-        f0_a, sp_a, ap_a = pw.wav2world(a_mono, sample_rate, frame_period=frame_ms)
-        f0_b, sp_b, ap_b = pw.wav2world(b_mono, sample_rate, frame_period=frame_ms)
+        n_ch = a.shape[1]
+        n_samples = a.shape[0]
+
+        # F0 is estimated on the downmix and shared by every channel. Tracking
+        # pitch per channel lets L and R drift apart by a few cents, which smears
+        # the stereo image into a chorus.
+        f0_a, tax_a = _estimate_f0(pw, _mono(a), sample_rate, frame_ms)
+        f0_b, tax_b = _estimate_f0(pw, _mono(b), sample_rate, frame_ms)
 
         # Align frame counts (WORLD can return ±1 frame for same-length input)
         n_frames = min(len(f0_a), len(f0_b))
-        f0_a, sp_a, ap_a = f0_a[:n_frames], sp_a[:n_frames], ap_a[:n_frames]
-        f0_b, sp_b, ap_b = f0_b[:n_frames], sp_b[:n_frames], ap_b[:n_frames]
+        f0_a, tax_a = f0_a[:n_frames], tax_a[:n_frames]
+        f0_b, tax_b = f0_b[:n_frames], tax_b[:n_frames]
+
+        # Envelope and aperiodicity stay per channel — that is where the stereo
+        # information lives.
+        sp_a, ap_a, sp_b, ap_b = [], [], [], []
+        for ch in range(n_ch):
+            ch_a = np.ascontiguousarray(a[:, ch])
+            ch_b = np.ascontiguousarray(b[:, ch])
+            sp_a.append(pw.cheaptrick(ch_a, f0_a, tax_a, sample_rate)[:n_frames])
+            ap_a.append(pw.d4c(ch_a, f0_a, tax_a, sample_rate)[:n_frames])
+            sp_b.append(pw.cheaptrick(ch_b, f0_b, tax_b, sample_rate)[:n_frames])
+            ap_b.append(pw.d4c(ch_b, f0_b, tax_b, sample_rate)[:n_frames])
 
         result: list[np.ndarray] = []
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
-
-            # Log-domain blend: the spectral envelope is a power spectrum, so an
-            # arithmetic blend stacks A's formants on top of B's instead of
-            # sliding one into the other.
-            sp_mix = interp_magnitude(sp_a, sp_b, t, mode=envelope)
-            ap_mix = np.clip(interp_magnitude(ap_a, ap_b, t, mode=envelope), 0.0, 1.0)
 
             if f0_mode == "keep_a":
                 f0_mix = f0_a.copy()
@@ -108,20 +131,32 @@ class WorldVocoderPlugin(MorphPlugin):
             else:
                 f0_mix = _interpolate_f0(f0_a, f0_b, t)
 
-            synth = pw.synthesize(
-                f0_mix, sp_mix, ap_mix, sample_rate, frame_period=frame_ms
-            )
+            cols = []
+            for ch in range(n_ch):
+                # Log-domain blend: the spectral envelope is a power spectrum, so
+                # an arithmetic blend stacks A's formants on top of B's instead
+                # of sliding one into the other.
+                sp_mix = interp_magnitude(sp_a[ch], sp_b[ch], t, mode=envelope)
+                ap_mix = np.clip(
+                    interp_magnitude(ap_a[ch], ap_b[ch], t, mode=envelope), 0.0, 1.0
+                )
+                synth = pw.synthesize(
+                    f0_mix, sp_mix, ap_mix, sample_rate, frame_period=frame_ms
+                )
+                if len(synth) >= n_samples:
+                    synth = synth[:n_samples]
+                else:
+                    synth = np.pad(synth, (0, n_samples - len(synth)))
+                cols.append(synth)
 
-            if len(synth) >= n_samples:
-                synth = synth[:n_samples]
-            else:
-                synth = np.pad(synth, (0, n_samples - len(synth)))
-
-            peak = np.max(np.abs(synth))
+            step = np.stack(cols, axis=1)
+            # One shared gain across channels, so a peak in L cannot shift the
+            # stereo balance.
+            peak = np.max(np.abs(step))
             if peak > 1.0:
-                synth /= peak
+                step = step / peak
 
-            result.append(synth.reshape(-1, 1).astype(np.float32))
+            result.append(step.astype(np.float32))
             if progress_cb:
                 progress_cb(i + 1)
 
@@ -130,11 +165,23 @@ class WorldVocoderPlugin(MorphPlugin):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _to_mono(audio: np.ndarray) -> np.ndarray:
+def _as_2d(audio: np.ndarray) -> np.ndarray:
     arr = audio.astype(np.float64)
-    if arr.ndim == 2:
-        arr = arr.mean(axis=1)
-    return arr
+    return arr if arr.ndim == 2 else arr.reshape(-1, 1)
+
+
+def _downmix(audio: np.ndarray) -> np.ndarray:
+    return audio.mean(axis=1, keepdims=True)
+
+
+def _mono(audio: np.ndarray) -> np.ndarray:
+    return np.ascontiguousarray(audio.mean(axis=1))
+
+
+def _estimate_f0(pw, mono: np.ndarray, sr: int, frame_ms: float):
+    """DIO + StoneMask F0 track — the same pair wav2world uses internally."""
+    f0, time_axis = pw.dio(mono, sr, frame_period=frame_ms)
+    return pw.stonemask(mono, f0, time_axis, sr), time_axis
 
 
 def _interpolate_f0(f0_a: np.ndarray, f0_b: np.ndarray, t: float) -> np.ndarray:

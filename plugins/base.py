@@ -103,6 +103,109 @@ def interp_phase(
     return phase_a + t * delta
 
 
+# ── LPC ↔ LSF ─────────────────────────────────────────────────────────────────
+
+# Frequency grid for the zero-crossing LSF search
+_N_EVAL = 512
+
+
+def interp_lpc(lpc_a: np.ndarray, lpc_b: np.ndarray, t: float) -> np.ndarray:
+    """Interpolate two LPC polynomials (a[0] = 1, even order) through the LSF domain.
+
+    A convex combination of the coefficients themselves is *not* guaranteed to be
+    stable: the blended all-pole filter can end up with poles outside the unit
+    circle and the synthesis blows up. Line Spectral Frequencies do not have that
+    problem — a filter is stable exactly when its LSFs are ordered and lie in
+    (0, π), and linear interpolation of two such sets preserves both properties.
+    """
+    lsf = (1.0 - t) * lpc_to_lsf(lpc_a) + t * lpc_to_lsf(lpc_b)
+    return lsf_to_lpc(lsf)
+
+
+def lpc_to_lsf(a: np.ndarray) -> np.ndarray:
+    """LPC polynomial a (a[0]=1, even order p) → LSF in (0, π), shape (p,).
+
+    Uses zero-crossing search on P(e^jω) and Q(e^jω) — no root-finding needed,
+    making this numerically robust even for near-singular frames.
+    """
+    p = len(a) - 1         # even order
+    a_r = a[::-1]
+
+    # P and Q polynomials in z^{-1} (length p+2)
+    P = np.zeros(p + 2)
+    Q = np.zeros(p + 2)
+    P[: p + 1] += a;  P[1:] += a_r   # symmetric:     P[k] = P[p+1-k]
+    Q[: p + 1] += a;  Q[1:] -= a_r   # antisymmetric: Q[k] = -Q[p+1-k]
+
+    # Sample both polynomials along the unit circle z = e^{jω}
+    ω = np.linspace(0.0, np.pi, _N_EVAL + 2)[1:-1]   # avoid exactly 0 and π
+    k = np.arange(p + 2, dtype=np.float64)
+    phase = np.outer(k, ω)                             # shape (p+2, N_EVAL)
+
+    # P and Q each carry a phase factor e^{-j(p+1)ω/2} on the unit circle.
+    # Cancelling it gives real-valued g_P and g_Q whose zero crossings are
+    # the actual LSFs — without spurious zeros from the phase term.
+    phase_comp = np.exp(1j * (p + 1) / 2.0 * ω)      # shape (N_EVAL,)
+    P_z = P @ np.exp(-1j * phase)
+    Q_z = Q @ np.exp(-1j * phase)
+
+    P_vals = (P_z * phase_comp).real   # g_P(ω): real, zeros give P-type LSFs
+    Q_vals = (Q_z * phase_comp).imag   # g_Q(ω): real (extra j in Q decomp)
+
+    def _crossings(vals: np.ndarray) -> np.ndarray:
+        idx = np.flatnonzero(np.sign(vals[:-1]) != np.sign(vals[1:]))
+        if not len(idx):
+            return np.empty(0)
+        dω = ω[1] - ω[0]
+        frac = vals[idx] / (vals[idx] - vals[idx + 1])
+        return ω[idx] + np.clip(frac, 0.0, 1.0) * dω
+
+    lsf = np.sort(np.concatenate([_crossings(P_vals), _crossings(Q_vals)]))
+
+    if len(lsf) < p:
+        # Fallback: uniformly spaced LSFs (stable, just inaccurate)
+        fallback = np.linspace(0.05, np.pi - 0.05, p)
+        lsf = np.sort(np.concatenate([lsf, fallback[len(lsf):]]))
+
+    return lsf[:p].copy()
+
+
+def lsf_to_lpc(lsf: np.ndarray) -> np.ndarray:
+    """LSF in (0, π), shape (even p,) → LPC polynomial, shape (p+1,), a[0]=1.
+
+    Reconstructs P and Q from their conjugate-pair roots, then recovers
+    A(z) = (P(z) + Q(z)) / 2.
+
+    Convention (even p):
+      even-indexed LSFs [0,2,4,…] → P-type roots  (P also has trivial root z=-1)
+      odd-indexed  LSFs [1,3,5,…] → Q-type roots  (Q also has trivial root z=+1)
+    """
+    p = len(lsf)
+    lsf_s = np.sort(lsf)
+
+    p_freqs = lsf_s[0::2]   # P roots
+    q_freqs = lsf_s[1::2]   # Q roots
+
+    def _build(freqs: np.ndarray) -> np.ndarray:
+        """Product of quadratic factors for complex-conjugate root pairs."""
+        poly = np.array([1.0])
+        for ω in freqs:
+            poly = np.convolve(poly, [1.0, -2.0 * np.cos(ω), 1.0])
+        return poly
+
+    # Reattach trivial roots then recover A(z)
+    P = np.convolve(_build(p_freqs), [1.0, 1.0])   # multiply by (1 + z^{-1})
+    Q = np.convolve(_build(q_freqs), [1.0, -1.0])  # multiply by (1 - z^{-1})
+
+    n = max(len(P), len(Q))
+    P = np.pad(P, (0, n - len(P)))
+    Q = np.pad(Q, (0, n - len(Q)))
+
+    a = (P + Q) / 2.0
+    a = a.real / a[0]          # normalise so a[0] = 1
+    return a[: p + 1]
+
+
 # ── Level matching ────────────────────────────────────────────────────────────
 
 def match_step_loudness(

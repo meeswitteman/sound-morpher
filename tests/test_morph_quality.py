@@ -6,6 +6,8 @@ Each test pins down a defect that was measured on the pre-fix code:
   * Griffin-Lim's endpoints were unrelated to A and B
   * intermediate steps drifted far below the endpoints in loudness
   * the Granular plugin's output was bit-for-bit a linear crossfade
+  * the LPC and WORLD vocoders collapsed stereo input to mono
+  * blending LPC coefficients directly produced unstable synthesis filters
 """
 
 from __future__ import annotations
@@ -13,7 +15,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from plugins.base import interp_magnitude, interp_phase, match_step_loudness
+from plugins.base import (
+    interp_lpc,
+    interp_magnitude,
+    interp_phase,
+    lpc_to_lsf,
+    lsf_to_lpc,
+    match_step_loudness,
+)
 
 SR = 44100
 
@@ -305,6 +314,214 @@ def test_granular_jitter_stays_in_bounds_at_the_edges():
     for s in steps:
         assert np.all(np.isfinite(s))
         assert float(np.max(np.abs(s))) <= 1.0
+
+
+# ── LPC ↔ LSF ─────────────────────────────────────────────────────────────────
+
+def _formant_lpc(freqs: list[float], radius: float = 0.95) -> np.ndarray:
+    """Build a stable all-pole filter with poles at the given frequencies."""
+    poly = np.array([1.0])
+    for f in freqs:
+        w = 2 * np.pi * f / SR
+        poly = np.convolve(poly, [1.0, -2 * radius * np.cos(w), radius ** 2])
+    return poly
+
+
+def _is_stable(lpc: np.ndarray) -> bool:
+    return bool(np.all(np.abs(np.roots(lpc)) < 1.0))
+
+
+def test_lsf_roundtrip_reconstructs_the_polynomial():
+    # rtol, not atol: the LSFs come from a 512-point zero-crossing search, so
+    # accuracy is relative to the grid resolution rather than absolute.
+    lpc = _formant_lpc([500.0, 1500.0, 2500.0, 3500.0])
+    np.testing.assert_allclose(lsf_to_lpc(lpc_to_lsf(lpc)), lpc, rtol=1e-3)
+
+
+def test_lsf_of_a_stable_filter_is_ordered_and_in_range():
+    lsf = lpc_to_lsf(_formant_lpc([300.0, 1200.0, 2400.0, 3600.0]))
+    assert np.all(np.diff(lsf) > 0)
+    assert np.all((lsf > 0) & (lsf < np.pi))
+
+
+def test_direct_coefficient_blending_can_go_unstable():
+    """The defect the LSF path exists to avoid."""
+    a = _formant_lpc([300.0, 900.0, 2700.0, 3300.0], radius=0.99)
+    b = _formant_lpc([1700.0, 2100.0, 3900.0, 4300.0], radius=0.99)
+    unstable = [t for t in np.linspace(0.05, 0.95, 19)
+                if not _is_stable((1 - t) * a + t * b)]
+    assert unstable, "expected the naive blend to leave the unit circle somewhere"
+
+
+def test_interp_lpc_is_stable_across_the_whole_sweep():
+    a = _formant_lpc([300.0, 900.0, 2700.0, 3300.0], radius=0.99)
+    b = _formant_lpc([1700.0, 2100.0, 3900.0, 4300.0], radius=0.99)
+    for t in np.linspace(0.0, 1.0, 41):
+        assert _is_stable(interp_lpc(a, b, float(t))), f"unstable at t={t:.2f}"
+
+
+def test_interp_lpc_endpoints_match_the_sources():
+    a = _formant_lpc([400.0, 1400.0, 2400.0, 3400.0])
+    b = _formant_lpc([700.0, 1100.0, 2900.0, 3100.0])
+    np.testing.assert_allclose(interp_lpc(a, b, 0.0), a, rtol=1e-3)
+    np.testing.assert_allclose(interp_lpc(a, b, 1.0), b, rtol=1e-3)
+
+
+def test_interp_lpc_moves_formants_between_the_sources():
+    """A single resonance should land between A's and B's, not split into two."""
+    a = _formant_lpc([500.0])
+    b = _formant_lpc([2000.0])
+    mid = interp_lpc(a, b, 0.5)
+    w, h = __import__("scipy.signal", fromlist=["freqz"]).freqz([1.0], mid, worN=2048, fs=SR)
+    peak = float(w[np.argmax(np.abs(h))])
+    assert 700.0 < peak < 1800.0
+
+
+# ── Vocoder plugins: stereo ───────────────────────────────────────────────────
+
+def _require_pyworld():
+    """pyworld needs the plugin's pkg_resources shim on Python 3.14+."""
+    from plugins.world_vocoder import _ensure_pyworld
+    try:
+        return _ensure_pyworld()
+    except ImportError:
+        pytest.skip("pyworld not installed")
+
+
+def _stereo_noise(frames: int, seed: int, amp: float = 0.2) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return (rng.standard_normal((frames, 2)) * amp).astype(np.float32)
+
+
+def test_lpc_vocoder_preserves_stereo():
+    from plugins.vocoder import VocoderPlugin
+
+    a, b = _stereo_noise(SR // 4, 10), _stereo_noise(SR // 4, 11)
+    steps = VocoderPlugin().morph(a, b, steps=3, sample_rate=SR)
+    for s in steps:
+        assert s.shape == (SR // 4, 2)
+        assert np.all(np.isfinite(s))
+    # Channels must not be identical — that would mean a downmix happened.
+    mid = steps[1]
+    assert float(np.max(np.abs(mid[:, 0] - mid[:, 1]))) > 1e-4
+
+
+def test_lpc_vocoder_mono_mode_still_downmixes():
+    from plugins.vocoder import VocoderPlugin
+
+    a, b = _stereo_noise(SR // 4, 10), _stereo_noise(SR // 4, 11)
+    steps = VocoderPlugin().morph(a, b, steps=3, sample_rate=SR, channels="mono")
+    for s in steps:
+        assert s.shape == (SR // 4, 1)
+
+
+def test_lpc_vocoder_accepts_mono_input():
+    from plugins.vocoder import VocoderPlugin
+
+    rng = np.random.default_rng(12)
+    a = (rng.standard_normal((SR // 4, 1)) * 0.2).astype(np.float32)
+    b = (rng.standard_normal((SR // 4, 1)) * 0.2).astype(np.float32)
+    steps = VocoderPlugin().morph(a, b, steps=3, sample_rate=SR)
+    assert all(s.shape == (SR // 4, 1) for s in steps)
+
+
+def test_lpc_vocoder_output_stays_bounded_on_a_hard_case():
+    """Two very different resonant sources: the old coefficient blend could blow up."""
+    from plugins.vocoder import VocoderPlugin
+    from scipy.signal import lfilter
+
+    rng = np.random.default_rng(13)
+    exc = rng.standard_normal(SR // 2)
+    a = lfilter([1.0], _formant_lpc([300.0, 900.0], 0.99), exc)
+    b = lfilter([1.0], _formant_lpc([2200.0, 3400.0], 0.99), exc)
+    a = (a / np.max(np.abs(a)) * 0.5).astype(np.float32).reshape(-1, 1)
+    b = (b / np.max(np.abs(b)) * 0.5).astype(np.float32).reshape(-1, 1)
+
+    steps = VocoderPlugin().morph(a, b, steps=7, sample_rate=SR)
+    for i, s in enumerate(steps):
+        assert np.all(np.isfinite(s)), f"non-finite output at step {i}"
+        assert float(np.max(np.abs(s))) <= 1.0
+
+
+def test_lpc_vocoder_tracks_the_input_level():
+    """A stable filter is not a quiet one.
+
+    LSF interpolation guarantees the poles stay inside the unit circle, but poles
+    close to it still ring hard. With a bounded level correction the synthesis
+    could not be pulled back down and landed ~17 dB hot, clipping most samples.
+    """
+    from plugins.vocoder import VocoderPlugin
+    from scipy.signal import lfilter
+
+    rng = np.random.default_rng(16)
+    exc = rng.standard_normal(SR // 2)
+    a = lfilter([1.0], _formant_lpc([400.0, 1100.0], 0.995), exc)
+    b = lfilter([1.0], _formant_lpc([1900.0, 3100.0], 0.995), exc)
+    a = (a / np.max(np.abs(a)) * 0.3).astype(np.float32).reshape(-1, 1)
+    b = (b / np.max(np.abs(b)) * 0.3).astype(np.float32).reshape(-1, 1)
+
+    steps = VocoderPlugin().morph(a, b, steps=5, sample_rate=SR)
+    reference = max(_rms(a), _rms(b))
+    for i, s in enumerate(steps):
+        assert _rms(s) < reference * 2.0, f"step {i} is {_rms(s) / reference:.1f}x too loud"
+        at_full_scale = int(np.count_nonzero(np.abs(s) >= 0.999))
+        assert at_full_scale < len(s) * 0.001, f"step {i} clips {at_full_scale} samples"
+
+
+def test_lpc_vocoder_odd_order_is_rounded_to_even():
+    """LSF conversion is only defined for even order."""
+    from plugins.vocoder import VocoderPlugin
+
+    a, b = _stereo_noise(SR // 8, 14), _stereo_noise(SR // 8, 15)
+    steps = VocoderPlugin().morph(a, b, steps=3, sample_rate=SR, lpc_order=17)
+    assert all(np.all(np.isfinite(s)) for s in steps)
+
+
+def test_world_vocoder_preserves_stereo():
+    _require_pyworld()
+    from plugins.world_vocoder import WorldVocoderPlugin
+
+    a, b = _tone(220.0, 0.4), _tone(330.0, 0.4)
+    a = np.repeat(a, 2, axis=1).copy()
+    b = np.repeat(b, 2, axis=1).copy()
+    a[:, 1] *= 0.4          # give the channels a different level
+    b[:, 1] *= 0.7
+
+    steps = WorldVocoderPlugin().morph(a, b, steps=3, sample_rate=SR)
+    for s in steps:
+        assert s.shape == (a.shape[0], 2)
+        assert np.all(np.isfinite(s))
+    mid = steps[1]
+    # The level difference between channels must survive the round trip.
+    assert _rms(mid[:, 1]) < _rms(mid[:, 0]) * 0.9
+
+
+def test_world_vocoder_mono_mode_still_downmixes():
+    _require_pyworld()
+    from plugins.world_vocoder import WorldVocoderPlugin
+
+    a, b = _tone(220.0, 0.3), _tone(330.0, 0.3)
+    a, b = np.repeat(a, 2, axis=1).copy(), np.repeat(b, 2, axis=1).copy()
+    steps = WorldVocoderPlugin().morph(a, b, steps=3, sample_rate=SR, channels="mono")
+    assert all(s.shape == (a.shape[0], 1) for s in steps)
+
+
+def test_world_vocoder_channels_share_one_pitch_track():
+    """Per-channel F0 estimation would let L and R drift apart into a chorus."""
+    _require_pyworld()
+    from plugins.world_vocoder import WorldVocoderPlugin
+
+    a, b = _tone(220.0, 0.4), _tone(330.0, 0.4)
+    a, b = np.repeat(a, 2, axis=1).copy(), np.repeat(b, 2, axis=1).copy()
+    a[:, 1] *= 0.5
+
+    mid = WorldVocoderPlugin().morph(a, b, steps=3, sample_rate=SR)[1]
+
+    def dominant(sig):
+        spec = np.abs(np.fft.rfft(sig * np.hanning(len(sig))))
+        return float(np.fft.rfftfreq(len(sig), 1 / SR)[np.argmax(spec)])
+
+    assert dominant(mid[:, 0]) == pytest.approx(dominant(mid[:, 1]), abs=1.0)
 
 
 # ── match_step_loudness ───────────────────────────────────────────────────────

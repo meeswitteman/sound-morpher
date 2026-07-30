@@ -29,7 +29,7 @@ A desktop application for morphing between two audio samples in configurable dis
 | **Spectral FFT** | Textures and atmospheric sounds — interpolates STFT magnitude and phase |
 | **Pitch Shift** | Melodic samples — shifts pitch while preserving timbre |
 | **Granular** | Atmospheric morphs — rebuilds the sound from grains scattered between A and B, with position and pitch jitter |
-| **Vocoder (LPC)** | Broadband audio — interpolates LPC spectral envelopes frame by frame |
+| **Vocoder (LPC)** | Broadband audio — interpolates LPC spectral envelopes frame by frame via Line Spectral Frequencies |
 | **WORLD Vocoder** | Voices and monophonic melodic samples — interpolates F0, spectral envelope, and aperiodicity using the WORLD speech synthesis framework |
 | **Griffin-Lim** | Experimental / sci-fi textures — interpolates magnitude spectra and reconstructs phase via Griffin-Lim iteration |
 
@@ -48,6 +48,11 @@ two spectra are combined:
 
 Because geometric blending is quieter than arithmetic blending, leave **Level
 Match** on when using `log`.
+
+Both vocoders take a **Channels** setting. `stereo` (default) analyses and
+synthesises each channel so the stereo image survives; the WORLD vocoder shares
+one pitch track across channels, since estimating F0 per channel lets them drift
+apart into a chorus. `mono` downmixes first and is roughly twice as fast.
 
 ---
 
