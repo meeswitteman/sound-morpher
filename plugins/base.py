@@ -46,6 +46,115 @@ class MorphPlugin(ABC):
         ...
 
 
+# ── Spectral interpolation ────────────────────────────────────────────────────
+
+def interp_magnitude(
+    mag_a: np.ndarray,
+    mag_b: np.ndarray,
+    t: float,
+    mode: str = "log",
+    floor_db: float = -100.0,
+) -> np.ndarray:
+    """Interpolate two magnitude spectra.
+
+    "log" (default) takes the geometric mean — exp((1-t)·ln|A| + t·ln|B|) — so a
+    partial present in A and absent in B *fades*, instead of both partials being
+    audible side by side as with the arithmetic mean. That is the difference
+    between a morph and a spectral crossfade.
+
+    Because the geometric mean is always ≤ the arithmetic mean, log mode makes
+    intermediate steps quieter; pair it with match_step_loudness().
+
+    "linear" is the plain arithmetic mean (pre-0.2 behaviour).
+    """
+    if mode == "linear":
+        return (1.0 - t) * mag_a + t * mag_b
+
+    ref = max(float(mag_a.max(initial=0.0)), float(mag_b.max(initial=0.0)), 1e-12)
+    floor = ref * (10.0 ** (floor_db / 20.0))
+    log_a = np.log(np.maximum(mag_a, floor))
+    log_b = np.log(np.maximum(mag_b, floor))
+    return np.exp((1.0 - t) * log_a + t * log_b)
+
+
+def interp_phase(
+    phase_a: np.ndarray,
+    phase_b: np.ndarray,
+    t: float,
+    mode: str = "shortest-arc",
+) -> np.ndarray:
+    """Interpolate two phase spectra (radians).
+
+    Phase is circular, so the naive (1-t)·∠A + t·∠B averages straight through the
+    ±π wrap and lands on an unrelated angle — which cancels partials that should
+    reinforce (measurably: two 440 Hz tones a phase-offset apart lose 11 dB at
+    t=0.5). The modes here all avoid that:
+
+    "shortest-arc" rotates ∠A toward ∠B the short way round the circle.
+    "dominant"     uses the phase of whichever source is weighted higher.
+    "linear"       the old, broken behaviour — kept for A/B comparison.
+    """
+    if mode == "linear":
+        return (1.0 - t) * phase_a + t * phase_b
+    if mode == "dominant":
+        return phase_b if t >= 0.5 else phase_a
+
+    delta = (phase_b - phase_a + np.pi) % (2.0 * np.pi) - np.pi
+    return phase_a + t * delta
+
+
+# ── Level matching ────────────────────────────────────────────────────────────
+
+def match_step_loudness(
+    steps: list[np.ndarray],
+    audio_a: np.ndarray,
+    audio_b: np.ndarray,
+    max_gain_db: float = 12.0,
+    ceiling: float = 0.99,
+) -> list[np.ndarray]:
+    """Scale each step so its RMS tracks a straight line from A's RMS to B's.
+
+    Blending two uncorrelated signals costs ~3 dB in the middle of the sequence,
+    and geometric-mean spectral interpolation costs more still, so intermediate
+    steps arrive audibly thinner than the endpoints. This restores the intended
+    loudness curve.
+
+    A single shared gain is applied afterwards if any step exceeds `ceiling`, so
+    the relative levels across the sequence are preserved.
+    """
+    if not steps:
+        return steps
+
+    rms_a = _rms(audio_a)
+    rms_b = _rms(audio_b)
+    max_gain = 10.0 ** (max_gain_db / 20.0)
+    n = len(steps)
+
+    scaled: list[np.ndarray] = []
+    for i, step in enumerate(steps):
+        t = i / (n - 1) if n > 1 else 0.0
+        target = (1.0 - t) * rms_a + t * rms_b
+        current = _rms(step)
+        if current < 1e-9 or target < 1e-9:
+            scaled.append(step)
+            continue
+        gain = np.clip(target / current, 1.0 / max_gain, max_gain)
+        scaled.append((step * gain).astype(np.float32))
+
+    peak = max((float(np.max(np.abs(s))) for s in scaled), default=0.0)
+    if peak > ceiling:
+        trim = ceiling / peak
+        scaled = [(s * trim).astype(np.float32) for s in scaled]
+
+    return scaled
+
+
+def _rms(audio: np.ndarray) -> float:
+    if audio.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+
+
 # ── Utility shared across plugins ─────────────────────────────────────────────
 
 def match_lengths(

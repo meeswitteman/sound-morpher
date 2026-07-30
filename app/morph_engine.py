@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
-from plugins.base import MorphPlugin, dtw_align
+from plugins.base import MorphPlugin, dtw_align, match_step_loudness
 
 
 class _Signals(QObject):
@@ -25,6 +25,7 @@ class _Worker(QRunnable):
         sample_rate: int,
         params: dict[str, Any],
         dtw: bool = False,
+        level_match: bool = True,
     ) -> None:
         super().__init__()
         self.signals = _Signals()
@@ -35,6 +36,7 @@ class _Worker(QRunnable):
         self._sample_rate = sample_rate
         self._params = params
         self._dtw = dtw
+        self._level_match = level_match
         self.setAutoDelete(True)
 
     def run(self) -> None:
@@ -62,6 +64,8 @@ class _Worker(QRunnable):
                     f"Plugin '{self._plugin.name}' returned {len(result)} steps, "
                     f"expected {steps}"
                 )
+            if self._level_match:
+                result = match_step_loudness(result, a, b)
             self.signals.finished.emit(result)
         except Exception as exc:
             self.signals.error.emit(str(exc))
@@ -95,6 +99,7 @@ class MorphEngine(QObject):
         sample_rate: int,
         params: dict[str, Any] | None = None,
         dtw: bool = False,
+        level_match: bool = True,
     ) -> None:
         """Start async morph computation. Emits finished() or error() when done."""
         if self._active:
@@ -104,7 +109,16 @@ class MorphEngine(QObject):
         self._generation += 1
         gen = self._generation
 
-        worker = _Worker(plugin, audio_a, audio_b, steps, sample_rate, params or {}, dtw=dtw)
+        worker = _Worker(
+            plugin,
+            audio_a,
+            audio_b,
+            steps,
+            sample_rate,
+            params or {},
+            dtw=dtw,
+            level_match=level_match,
+        )
         worker.signals.progress.connect(self.progress)
         worker.signals.finished.connect(lambda result, g=gen: self._on_finished(result, g))
         worker.signals.error.connect(lambda msg, g=gen: self._on_error(msg, g))

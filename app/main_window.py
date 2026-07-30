@@ -225,6 +225,14 @@ class MainWindow(QMainWindow):
         )
         row.addWidget(self.chk_dtw)
 
+        self.chk_level_match = QCheckBox("Level Match")
+        self.chk_level_match.setChecked(True)
+        self.chk_level_match.setToolTip(
+            "Scale every step so its loudness follows a straight line from A to B. "
+            "Without it, intermediate steps sound thinner than the endpoints."
+        )
+        row.addWidget(self.chk_level_match)
+
         row.addStretch()
         outer.addLayout(row)
 
@@ -473,6 +481,7 @@ class MainWindow(QMainWindow):
             sample_rate=self.project.sample_rate,
             params=self._param_panel.get_params(),
             dtw=self.chk_dtw.isChecked(),
+            level_match=self.chk_level_match.isChecked(),
         )
 
     def _on_morph_progress(self, value: int) -> None:

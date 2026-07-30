@@ -15,11 +15,13 @@ class CrossfadePlugin(MorphPlugin):
             name="curve",
             label="Curve",
             type="choice",
-            default="linear",
-            choices=["linear", "equal-power"],
+            default="equal-power",
+            choices=["equal-power", "linear"],
             tooltip=(
-                "linear: straight volume ramp.  "
-                "equal-power: sinusoidal ramp that preserves perceived loudness."
+                "equal-power: sinusoidal ramp that preserves perceived loudness "
+                "across the sequence.  "
+                "linear: straight volume ramp — dips ~3 dB in the middle when A "
+                "and B are uncorrelated."
             ),
         )
     ]
@@ -31,7 +33,7 @@ class CrossfadePlugin(MorphPlugin):
         steps: int,
         sample_rate: int,
         progress_cb=None,
-        curve: str = "linear",
+        curve: str = "equal-power",
         **_: object,
     ) -> list[np.ndarray]:
         a, b = match_lengths(audio_a, audio_b)

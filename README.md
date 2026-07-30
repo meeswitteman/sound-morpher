@@ -12,6 +12,7 @@ A desktop application for morphing between two audio samples in configurable dis
 - **Spectrogram thumbnails** per morph step, computed on the fly
 - **BPM-synchronized playback** with tap tempo and loop toggle
 - **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing
+- **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints
 - **Live recording** — record directly into a source slot (mic or line-in)
 - **Trim & volume** controls per source slot
 - **Project files** — save and reload full sessions as `.smorph`
@@ -24,13 +25,29 @@ A desktop application for morphing between two audio samples in configurable dis
 
 | Plugin | Best for |
 |--------|----------|
-| **Crossfade** | Everything — simple linear or equal-power volume blend |
+| **Crossfade** | Everything — equal-power (default) or linear volume blend |
 | **Spectral FFT** | Textures and atmospheric sounds — interpolates STFT magnitude and phase |
 | **Pitch Shift** | Melodic samples — shifts pitch while preserving timbre |
 | **Granular** | Atmospheric morphs — blends overlapping grains from both sources |
 | **Vocoder (LPC)** | Broadband audio — interpolates LPC spectral envelopes frame by frame |
 | **WORLD Vocoder** | Voices and monophonic melodic samples — interpolates F0, spectral envelope, and aperiodicity using the WORLD speech synthesis framework |
 | **Griffin-Lim** | Experimental / sci-fi textures — interpolates magnitude spectra and reconstructs phase via Griffin-Lim iteration |
+
+### Magnitude and Phase modes
+
+The spectral plugins (Spectral FFT, Griffin-Lim, WORLD Vocoder) expose how the
+two spectra are combined:
+
+- **Magnitude — `log`** (default) blends geometrically, so a partial present in A
+  fades out as B's fades in. **`linear`** blends arithmetically, which leaves both
+  spectra audible side by side: a spectral crossfade rather than a morph.
+- **Phase — `shortest-arc`** (default) rotates A's phase toward B the short way
+  round the circle. **`dominant`** takes the phase of the higher-weighted source.
+  **`linear`** is the naive average; it averages straight through the ±π wrap and
+  cancels partials that should reinforce, and is kept only for comparison.
+
+Because geometric blending is quieter than arithmetic blending, leave **Level
+Match** on when using `log`.
 
 ---
 

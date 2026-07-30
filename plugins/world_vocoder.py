@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from plugins.base import MorphPlugin, PluginParam, match_lengths
+from plugins.base import MorphPlugin, PluginParam, interp_magnitude, match_lengths
 
 
 def _ensure_pyworld():
@@ -50,6 +50,17 @@ class WorldVocoderPlugin(MorphPlugin):
             max_val=20.0,
             tooltip="Analysis frame period in ms. Lower = more temporal detail, slower.",
         ),
+        PluginParam(
+            name="envelope",
+            label="Envelope",
+            type="choice",
+            default="log",
+            choices=["log", "linear"],
+            tooltip=(
+                "log: formants of A slide into B's (true morph).  "
+                "linear: both formant sets sound at once."
+            ),
+        ),
     ]
 
     def morph(
@@ -61,6 +72,7 @@ class WorldVocoderPlugin(MorphPlugin):
         progress_cb=None,
         f0_mode: str = "interpolate",
         frame_ms: float = 5.0,
+        envelope: str = "log",
         **_: Any,
     ) -> list[np.ndarray]:
         pw = _ensure_pyworld()
@@ -83,8 +95,11 @@ class WorldVocoderPlugin(MorphPlugin):
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
 
-            sp_mix = (1.0 - t) * sp_a + t * sp_b
-            ap_mix = np.clip((1.0 - t) * ap_a + t * ap_b, 0.0, 1.0)
+            # Log-domain blend: the spectral envelope is a power spectrum, so an
+            # arithmetic blend stacks A's formants on top of B's instead of
+            # sliding one into the other.
+            sp_mix = interp_magnitude(sp_a, sp_b, t, mode=envelope)
+            ap_mix = np.clip(interp_magnitude(ap_a, ap_b, t, mode=envelope), 0.0, 1.0)
 
             if f0_mode == "keep_a":
                 f0_mix = f0_a.copy()
