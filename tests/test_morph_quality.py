@@ -8,6 +8,8 @@ Each test pins down a defect that was measured on the pre-fix code:
   * the Granular plugin's output was bit-for-bit a linear crossfade
   * the LPC and WORLD vocoders collapsed stereo input to mono
   * blending LPC coefficients directly produced unstable synthesis filters
+  * DTW alignment resampled the signal, sliding its pitch with the warp path
+  * 16-bit export quantised without dither
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import numpy as np
 import pytest
 
 from plugins.base import (
+    dtw_align,
     interp_lpc,
     interp_magnitude,
     interp_phase,
@@ -522,6 +525,169 @@ def test_world_vocoder_channels_share_one_pitch_track():
         return float(np.fft.rfftfreq(len(sig), 1 / SR)[np.argmax(spec)])
 
     assert dominant(mid[:, 0]) == pytest.approx(dominant(mid[:, 1]), abs=1.0)
+
+
+# ── DTW alignment ─────────────────────────────────────────────────────────────
+
+def _dominant(sig: np.ndarray) -> float:
+    mono = sig.mean(axis=1) if sig.ndim == 2 else sig
+    spec = np.abs(np.fft.rfft(mono * np.hanning(len(mono))))
+    return float(np.fft.rfftfreq(len(mono), 1 / SR)[np.argmax(spec)])
+
+
+def _ramped_tone(freq: float, seconds: float, rate: float) -> np.ndarray:
+    """A steady tone whose *events* run at `rate`, so DTW has to stretch it."""
+    n = int(SR * seconds)
+    t = np.arange(n) / SR
+    tone = np.sin(2 * np.pi * freq * t)
+    # Amplitude bursts at a tempo scaled by `rate` give the MFCCs something to
+    # align on without changing the pitch.
+    env = 0.5 + 0.5 * np.sin(2 * np.pi * 3.0 * rate * t)
+    return (0.5 * tone * env).astype(np.float32).reshape(-1, 1)
+
+
+def test_dtw_stretch_preserves_pitch():
+    """The old resampling path slid pitch wherever the warp left the diagonal."""
+    a = _ramped_tone(440.0, 1.5, rate=1.0)
+    b = _ramped_tone(440.0, 1.5, rate=1.7)
+
+    warped_a, warped_b = dtw_align(a, b, SR)
+    assert _dominant(warped_a) == pytest.approx(440.0, abs=12.0)
+    assert _dominant(warped_b) == pytest.approx(440.0, abs=12.0)
+
+
+def test_dtw_resample_mode_still_slides_pitch():
+    """Kept reachable, so the fix is demonstrably the cause of the improvement."""
+    a = _ramped_tone(440.0, 1.5, rate=1.0)
+    b = _ramped_tone(440.0, 1.5, rate=1.7)
+
+    stretched, _ = dtw_align(a, b, SR)
+    resampled, _ = dtw_align(a, b, SR, mode="resample")
+
+    def spread(sig):
+        mono = sig.mean(axis=1) if sig.ndim == 2 else sig
+        spec = np.abs(np.fft.rfft(mono * np.hanning(len(mono))))
+        freqs = np.fft.rfftfreq(len(mono), 1 / SR)
+        band = (freqs > 200) & (freqs < 900)
+        w = spec[band] / (spec[band].sum() + 1e-12)
+        centre = float((freqs[band] * w).sum())
+        return float(np.sqrt((w * (freqs[band] - centre) ** 2).sum()))
+
+    # Varispeed smears the 440 Hz partial across a band; the stretch does not.
+    assert spread(resampled) > spread(stretched)
+
+
+def test_dtw_output_lengths_match():
+    a = _ramped_tone(330.0, 1.0, rate=1.0)
+    b = _ramped_tone(330.0, 1.4, rate=1.5)
+    warped_a, warped_b = dtw_align(a, b, SR)
+    assert len(warped_a) == len(warped_b) == max(len(a), len(b))
+
+
+def test_dtw_preserves_shape_and_channels():
+    rng = np.random.default_rng(20)
+    a = (rng.standard_normal((SR, 2)) * 0.2).astype(np.float32)
+    b = (rng.standard_normal((SR, 2)) * 0.2).astype(np.float32)
+    warped_a, warped_b = dtw_align(a, b, SR)
+    assert warped_a.shape == warped_b.shape == (SR, 2)
+    assert np.all(np.isfinite(warped_a)) and np.all(np.isfinite(warped_b))
+
+
+def test_dtw_handles_signals_shorter_than_one_fft_frame():
+    a = _tone(440.0, 0.01)
+    b = _tone(660.0, 0.01)
+    warped_a, warped_b = dtw_align(a, b, SR)
+    assert np.all(np.isfinite(warped_a)) and np.all(np.isfinite(warped_b))
+
+
+# ── Export dither ─────────────────────────────────────────────────────────────
+
+def test_dither_is_one_lsb_of_the_target_depth():
+    from app.export import apply_tpdf_dither
+
+    silence = np.zeros((200000, 1), dtype=np.float32)
+    dithered = apply_tpdf_dither(silence, 16, np.random.default_rng(0))
+    lsb = 1.0 / 2 ** 15
+
+    assert float(np.max(np.abs(dithered))) <= lsb * 1.001
+    # Triangular distribution: variance is 2/12 of a uniform LSB draw.
+    assert float(np.std(dithered)) == pytest.approx(lsb * np.sqrt(2 / 12), rel=0.05)
+
+
+def test_dither_turns_quantisation_distortion_into_noise():
+    """The point of dither, measured where it is audible: the spectrum.
+
+    A quiet sine quantised without dither comes back as a staircase, whose error
+    is a deterministic function of the signal. The spectrum is then nothing but
+    discrete harmonics — distortion tones at 6.5 % of the fundamental with an
+    empty floor between them. Dither trades those for an ordinary noise floor.
+    """
+    from app.export import apply_tpdf_dither
+
+    n_samples, cycles = 16384, 61     # exact number of cycles: no leakage
+    lsb = 1.0 / 2 ** 15
+    phase = 2 * np.pi * cycles * np.arange(n_samples) / n_samples
+    signal = (2.0 * lsb * np.sin(phase)).astype(np.float32).reshape(-1, 1)
+
+    def quantise(x):
+        return np.round(x * 2 ** 15) / 2 ** 15
+
+    def measure(x):
+        spec = np.abs(np.fft.rfft(quantise(x).ravel()))
+        harmonics = max(spec[3 * cycles], spec[5 * cycles], spec[7 * cycles])
+        return float(np.median(spec)), float(spec[cycles]), float(harmonics)
+
+    plain_floor, plain_fund, plain_harm = measure(signal)
+    dith_floor, dith_fund, dith_harm = measure(
+        apply_tpdf_dither(signal, 16, np.random.default_rng(1))
+    )
+
+    # Undithered: no noise floor at all, just harmonic distortion.
+    assert plain_floor < plain_fund * 1e-6
+    assert plain_harm > plain_fund * 0.03
+
+    # Dithered: a real floor, with the distortion tones buried in it and the
+    # signal still well clear of it.
+    assert dith_floor > 0.0
+    assert dith_harm < dith_floor * 6.0
+    assert dith_fund > dith_floor * 50.0
+
+
+def test_dither_never_exceeds_full_scale():
+    from app.export import apply_tpdf_dither
+
+    hot = np.full((10000, 2), 1.0, dtype=np.float32)
+    out = apply_tpdf_dither(hot, 16, np.random.default_rng(2))
+    assert float(np.max(np.abs(out))) <= 1.0
+    assert out.dtype == np.float32
+
+
+def test_export_writes_dithered_and_undithered_files(tmp_path):
+    import soundfile as sf
+    from app.export import _ExportWorker
+
+    silence = [np.zeros((20000, 1), dtype=np.float32)]
+
+    plain = tmp_path / "plain"
+    _ExportWorker(silence, plain, SR, 16, dither=False).run()
+    data, _ = sf.read(str(plain / "morph_step_01.wav"), always_2d=True)
+    assert float(np.max(np.abs(data))) == 0.0
+
+    dithered = tmp_path / "dithered"
+    _ExportWorker(silence, dithered, SR, 16, dither=True).run()
+    data, _ = sf.read(str(dithered / "morph_step_01.wav"), always_2d=True)
+    assert float(np.max(np.abs(data))) > 0.0
+
+
+def test_export_skips_dither_at_24_bit(tmp_path):
+    import soundfile as sf
+    from app.export import _ExportWorker
+
+    silence = [np.zeros((20000, 1), dtype=np.float32)]
+    out = tmp_path / "wide"
+    _ExportWorker(silence, out, SR, 24, dither=True).run()
+    data, _ = sf.read(str(out / "morph_step_01.wav"), always_2d=True)
+    assert float(np.max(np.abs(data))) == 0.0
 
 
 # ── match_step_loudness ───────────────────────────────────────────────────────

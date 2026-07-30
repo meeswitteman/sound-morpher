@@ -11,7 +11,7 @@ A desktop application for morphing between two audio samples in configurable dis
 - **7 morphing algorithms** — from simple crossfade to WORLD vocoder and Griffin-Lim
 - **Spectrogram thumbnails** per morph step, computed on the fly
 - **BPM-synchronized playback** with tap tempo and loop toggle
-- **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing
+- **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing, time-stretched through a phase vocoder so the alignment does not move either sound's pitch
 - **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints
 - **Live recording** — record directly into a source slot (mic or line-in)
 - **Trim & volume** controls per source slot
@@ -49,10 +49,24 @@ two spectra are combined:
 Because geometric blending is quieter than arithmetic blending, leave **Level
 Match** on when using `log`.
 
+### Channels
+
 Both vocoders take a **Channels** setting. `stereo` (default) analyses and
 synthesises each channel so the stereo image survives; the WORLD vocoder shares
 one pitch track across channels, since estimating F0 per channel lets them drift
 apart into a chorus. `mono` downmixes first and is roughly twice as fast.
+
+---
+
+## Export
+
+Steps are written as `morph_step_01.wav` … `morph_step_NN.wav` at the project's
+sample rate and bit depth. 16-bit exports get TPDF dither, which turns the
+quantiser's signal-dependent distortion into an ordinary noise floor — most
+audible on the fades and tails a morph sequence is full of. Toggle it under
+**Project → Dither 16-bit Exports**; turn it off when the steps feed further
+processing, so dither is applied only once at the very end. 24-bit exports are
+never dithered, as the quantisation already sits below anything audible.
 
 ---
 

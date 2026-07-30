@@ -289,11 +289,18 @@ def dtw_align(
     sr: int,
     hop_length: int = 512,
     n_mfcc: int = 20,
+    mode: str = "stretch",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return time-warped copies of A and B aligned to a common DTW timeline.
 
-    Uses MFCC features for the alignment cost matrix, then resamples both
+    Uses MFCC features for the alignment cost matrix, then time-warps both
     signals so that phonetically/spectrally similar moments line up.
+
+    "stretch" (default) warps through a phase vocoder, which preserves pitch.
+    "resample" reads the samples straight off the warp path — that is literally
+    varispeed, so wherever the path departs from the diagonal the pitch slides
+    with it. It is kept only for comparison.
+
     If librosa or scipy are unavailable, falls back to returning the originals.
     """
     try:
@@ -330,11 +337,15 @@ def dtw_align(
     src_a = np.clip(np.interp(out_idx, path_idx, centers_a), 0, len(a) - 1)
     src_b = np.clip(np.interp(out_idx, path_idx, centers_b), 0, len(b) - 1)
 
-    def _warp(signal: np.ndarray, src: np.ndarray) -> np.ndarray:
+    def _resample(signal: np.ndarray, src: np.ndarray) -> np.ndarray:
         x = np.arange(len(signal), dtype=np.float64)
         f = interp1d(x, signal.astype(np.float64),
                      bounds_error=False, fill_value=(float(signal[0]), float(signal[-1])))
         return f(src).astype(np.float32)
+
+    _warp = _resample if mode == "resample" else (
+        lambda signal, src: _stretch_to_time_map(signal, src, hop_length)
+    )
 
     cols_a = [_warp(a[:, ch] if is_2d else a, src_a) for ch in range(channels)]
     cols_b = [_warp(b[:, ch] if is_2d else b, src_b) for ch in range(channels)]
@@ -342,3 +353,79 @@ def dtw_align(
     if is_2d:
         return np.stack(cols_a, axis=1), np.stack(cols_b, axis=1)
     return cols_a[0], cols_b[0]
+
+
+def _stretch_to_time_map(
+    signal: np.ndarray,
+    src: np.ndarray,
+    hop_length: int,
+) -> np.ndarray:
+    """Time-warp `signal` onto the sample map `src` without moving its pitch.
+
+    `src[i]` is the source sample that output sample i should come from. Reading
+    those samples directly is varispeed; instead this resamples the *STFT frames*
+    along that map and re-integrates phase at each bin's own rate, so partials
+    keep their frequencies however far the map departs from the diagonal.
+    """
+    import librosa
+
+    n_out = len(src)
+    n_fft = hop_length * 4
+    sig = signal.astype(np.float32)
+
+    if len(sig) < n_fft:
+        # Too short for a meaningful STFT; the naive read is all that is left.
+        idx = np.clip(src, 0, len(sig) - 1)
+        lo = np.floor(idx).astype(np.int64)
+        hi = np.minimum(lo + 1, len(sig) - 1)
+        frac = idx - lo
+        return (sig[lo] * (1.0 - frac) + sig[hi] * frac).astype(np.float32)
+
+    D = librosa.stft(sig, n_fft=n_fft, hop_length=hop_length)
+    n_frames = D.shape[1]
+
+    # Source frame index for each output frame, from the per-sample map.
+    out_frames = np.arange(0, n_out, hop_length, dtype=np.float64)
+    time_map = np.interp(out_frames, np.arange(n_out, dtype=np.float64), src)
+    time_map = np.clip(time_map / hop_length, 0.0, n_frames - 1.0)
+
+    warped = _phase_vocoder(D, time_map, hop_length, n_fft)
+    out = librosa.istft(warped, hop_length=hop_length, n_fft=n_fft, length=n_out)
+    return out.astype(np.float32)
+
+
+def _phase_vocoder(
+    D: np.ndarray,
+    time_map: np.ndarray,
+    hop_length: int,
+    n_fft: int,
+) -> np.ndarray:
+    """Phase vocoder over an arbitrary time map.
+
+    librosa.phase_vocoder only takes a constant rate; DTW produces a rate that
+    changes frame by frame, so the frame stepping is driven by `time_map` here.
+    """
+    n_bins = D.shape[0]
+    # Phase a bin is expected to advance over one hop if its frequency sits
+    # exactly on the bin centre.
+    expected = hop_length * 2.0 * np.pi * np.arange(n_bins) / n_fft
+
+    padded = np.pad(D, ((0, 0), (0, 2)), mode="constant")
+    mag = np.abs(padded)
+    ang = np.angle(padded)
+
+    out = np.zeros((n_bins, len(time_map)), dtype=np.complex64)
+    phase = ang[:, 0].copy()
+
+    for i, step in enumerate(time_map):
+        k = int(step)
+        frac = step - k
+        out[:, i] = ((1.0 - frac) * mag[:, k] + frac * mag[:, k + 1]) * np.exp(1j * phase)
+
+        # Deviation from the expected advance = the bin's true instantaneous
+        # frequency; accumulate that so partials stay put under any stretch.
+        delta = ang[:, k + 1] - ang[:, k] - expected
+        delta -= 2.0 * np.pi * np.round(delta / (2.0 * np.pi))
+        phase = phase + expected + delta
+
+    return out

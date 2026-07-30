@@ -87,6 +87,20 @@ class MainWindow(QMainWindow):
 
         project_menu = mb.addMenu("Project")
         project_menu.addAction("Project Settings…")
+        project_menu.addSeparator()
+        self._act_dither = project_menu.addAction("Dither 16-bit Exports")
+        self._act_dither.setCheckable(True)
+        self._act_dither.setChecked(
+            self._settings.value("export/dither", True, type=bool)
+        )
+        self._act_dither.setToolTip(
+            "Add TPDF dither when exporting at 16 bit. Leave on for finished "
+            "files; turn off when the steps feed further processing, so dither "
+            "is applied only once at the end."
+        )
+        self._act_dither.toggled.connect(
+            lambda on: self._settings.setValue("export/dither", on)
+        )
 
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Manage Plugins…")
@@ -685,6 +699,7 @@ class MainWindow(QMainWindow):
             output_dir=folder,
             sample_rate=self.project.sample_rate,
             bit_depth=self.project.bit_depth,
+            dither=self._act_dither.isChecked(),
         )
 
     def _on_export_progress(self, value: int) -> None:
