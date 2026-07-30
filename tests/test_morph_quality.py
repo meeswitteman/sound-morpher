@@ -5,6 +5,7 @@ Each test pins down a defect that was measured on the pre-fix code:
   * arithmetic magnitude interpolation stacked both spectra instead of morphing
   * Griffin-Lim's endpoints were unrelated to A and B
   * intermediate steps drifted far below the endpoints in loudness
+  * the Granular plugin's output was bit-for-bit a linear crossfade
 """
 
 from __future__ import annotations
@@ -177,6 +178,133 @@ def test_griffin_lim_seeded_phase_beats_random_init():
     # Same target magnitude; the seeded run should land closer to the sources.
     assert _rms(seeded) >= _rms(unseeded) * 0.95
     assert np.all(np.isfinite(seeded))
+
+
+# ── Granular ──────────────────────────────────────────────────────────────────
+
+def _granular(a, b, steps=5, **kw):
+    from plugins.granular import GranularPlugin
+    return GranularPlugin().morph(a, b, steps=steps, sample_rate=SR, **kw)
+
+
+def test_granular_scatter_is_not_a_crossfade():
+    """The old implementation matched CrossfadePlugin on all but one sample."""
+    from plugins.crossfade import CrossfadePlugin
+
+    rng = np.random.default_rng(1)
+    a = (rng.standard_normal((SR // 2, 1)) * 0.2).astype(np.float32)
+    b = (rng.standard_normal((SR // 2, 1)) * 0.2).astype(np.float32)
+
+    gran = _granular(a, b)[2]
+    fade = CrossfadePlugin().morph(a, b, steps=5, sample_rate=SR, curve="linear")[2]
+    differing = int(np.count_nonzero(np.abs(gran - fade) > 1e-5))
+    assert differing > len(a) * 0.9
+
+
+def test_granular_mix_mode_still_matches_crossfade():
+    """The old behaviour stays reachable, so the difference is demonstrably the mode."""
+    from plugins.crossfade import CrossfadePlugin
+
+    rng = np.random.default_rng(1)
+    a = (rng.standard_normal((SR // 2, 1)) * 0.2).astype(np.float32)
+    b = (rng.standard_normal((SR // 2, 1)) * 0.2).astype(np.float32)
+
+    gran = _granular(a, b, mode="mix")[2]
+    fade = CrossfadePlugin().morph(a, b, steps=5, sample_rate=SR, curve="linear")[2]
+    np.testing.assert_allclose(gran, fade, atol=1e-5)
+
+
+def test_granular_grain_source_share_tracks_t():
+    """A 440/660 pair: the share of B-sourced grains should rise with t."""
+    a, b = _tone(440.0, 1.0), _tone(660.0, 1.0)
+    steps = _granular(a, b, steps=5, jitter_ms=0.0)
+
+    def b_share(sig):
+        spec = np.abs(np.fft.rfft(sig.ravel() * np.hanning(len(sig))))
+        freqs = np.fft.rfftfreq(len(sig), 1 / SR)
+        e440 = spec[np.argmin(np.abs(freqs - 440))]
+        e660 = spec[np.argmin(np.abs(freqs - 660))]
+        return e660 / (e440 + e660 + 1e-12)
+
+    shares = [b_share(s) for s in steps]
+    assert shares == sorted(shares)
+    assert shares[0] < 0.05 and shares[-1] > 0.95
+
+
+def test_granular_grains_switch_monotonically_across_steps():
+    """Shared draws mean a grain flips A→B once and never back."""
+    a = np.full((SR // 2, 1), 1.0, dtype=np.float32)
+    b = np.full((SR // 2, 1), -1.0, dtype=np.float32)
+    steps = _granular(a, b, steps=6, jitter_ms=0.0)
+    # Constant sources: each sample's value tracks how many of its overlapping
+    # grains came from B, which must only ever increase.
+    means = [float(np.mean(s)) for s in steps]
+    assert all(later <= earlier + 1e-6 for earlier, later in zip(means, means[1:]))
+
+
+def test_granular_seed_is_reproducible_and_changeable():
+    rng = np.random.default_rng(2)
+    a = (rng.standard_normal((SR // 4, 1)) * 0.2).astype(np.float32)
+    b = (rng.standard_normal((SR // 4, 1)) * 0.2).astype(np.float32)
+
+    first = _granular(a, b, seed=7)[2]
+    again = _granular(a, b, seed=7)[2]
+    other = _granular(a, b, seed=8)[2]
+
+    np.testing.assert_array_equal(first, again)
+    assert float(np.max(np.abs(first - other))) > 1e-4
+
+
+def test_granular_endpoints_are_bit_exact():
+    a, b = _tone(440.0, 0.3), _tone(660.0, 0.3)
+    steps = _granular(a, b, steps=4)
+    np.testing.assert_array_equal(steps[0], a)
+    np.testing.assert_array_equal(steps[-1], b)
+
+
+def test_granular_has_no_dropout_on_the_first_sample():
+    """The old Hann window hit zero at sample 0, leaving it unweighted."""
+    a = np.full((SR // 4, 1), 0.5, dtype=np.float32)
+    b = np.full((SR // 4, 1), 0.5, dtype=np.float32)
+    mid = _granular(a, b, steps=3, jitter_ms=0.0)[1]
+    assert float(mid[0, 0]) == pytest.approx(0.5, abs=1e-3)
+
+
+def test_granular_pitch_jitter_transposes_grains():
+    a, b = _tone(440.0, 1.0), _tone(440.0, 1.0)
+    clean = _granular(a, b, steps=3, jitter_ms=0.0, pitch_jitter=0.0)[1]
+    shifted = _granular(a, b, steps=3, jitter_ms=0.0, pitch_jitter=6.0)[1]
+
+    def spread(sig):
+        spec = np.abs(np.fft.rfft(sig.ravel() * np.hanning(len(sig))))
+        freqs = np.fft.rfftfreq(len(sig), 1 / SR)
+        band = (freqs > 200) & (freqs < 900)
+        w = spec[band] / (spec[band].sum() + 1e-12)
+        centre = float((freqs[band] * w).sum())
+        return float(np.sqrt((w * (freqs[band] - centre) ** 2).sum()))
+
+    # Detuned grains smear energy either side of 440 Hz.
+    assert spread(shifted) > spread(clean) * 1.5
+
+
+def test_granular_stereo_is_preserved():
+    rng = np.random.default_rng(3)
+    a = (rng.standard_normal((SR // 4, 2)) * 0.2).astype(np.float32)
+    b = (rng.standard_normal((SR // 4, 2)) * 0.2).astype(np.float32)
+    steps = _granular(a, b, steps=4, pitch_jitter=3.0)
+    for s in steps:
+        assert s.shape == (SR // 4, 2)
+        assert s.dtype == np.float32
+        assert np.all(np.isfinite(s))
+
+
+def test_granular_jitter_stays_in_bounds_at_the_edges():
+    """Negative offsets at the head and overruns at the tail must not wrap or crash."""
+    a, b = _tone(440.0, 0.2), _tone(660.0, 0.2)
+    steps = _granular(a, b, steps=5, jitter_ms=200.0, pitch_jitter=12.0)
+    for s in steps:
+        assert np.all(np.isfinite(s))
+        assert float(np.max(np.abs(s))) <= 1.0
 
 
 # ── match_step_loudness ───────────────────────────────────────────────────────

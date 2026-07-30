@@ -28,7 +28,7 @@ A desktop application for morphing between two audio samples in configurable dis
 | **Crossfade** | Everything — equal-power (default) or linear volume blend |
 | **Spectral FFT** | Textures and atmospheric sounds — interpolates STFT magnitude and phase |
 | **Pitch Shift** | Melodic samples — shifts pitch while preserving timbre |
-| **Granular** | Atmospheric morphs — blends overlapping grains from both sources |
+| **Granular** | Atmospheric morphs — rebuilds the sound from grains scattered between A and B, with position and pitch jitter |
 | **Vocoder (LPC)** | Broadband audio — interpolates LPC spectral envelopes frame by frame |
 | **WORLD Vocoder** | Voices and monophonic melodic samples — interpolates F0, spectral envelope, and aperiodicity using the WORLD speech synthesis framework |
 | **Griffin-Lim** | Experimental / sci-fi textures — interpolates magnitude spectra and reconstructs phase via Griffin-Lim iteration |
