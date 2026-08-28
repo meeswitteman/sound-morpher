@@ -11,7 +11,7 @@ from plugins.base import (
     match_lengths,
 )
 
-_FFT_CHOICES = ["256", "512", "1024", "2048"]
+_FFT_CHOICES = ["256", "512", "1024", "2048", "4096"]
 
 
 class SpectralFftPlugin(MorphPlugin):
