@@ -266,6 +266,7 @@ def limit_peaks(
     sample_rate: int,
     ceiling: float = 0.99,
     window_ms: float = 5.0,
+    oversample: int = 4,
 ) -> np.ndarray:
     """Look-ahead peak limiter. Returns `audio` with nothing above `ceiling`.
 
@@ -289,15 +290,39 @@ def limit_peaks(
 
     Gain is derived from the loudest channel, so limiting cannot shift the stereo
     image.
+
+    Sample peaks are not the whole story: the D/A reconstruction between samples
+    can overshoot every sample in the file by a dB or more on band-limited
+    content — exactly what spectral/LPC/vocoder reconstruction produces. To catch
+    that, the signal is oversampled `oversample`x through a bandlimited
+    polyphase filter and each block of interpolated points is folded back onto
+    the one original sample it spans, by taking its max. That folded estimate is
+    then combined with the raw sample envelope via `maximum` rather than used on
+    its own — interpolation can in principle land a hair under the true
+    continuous peak, and taking the max keeps the ceiling a hard guarantee on the
+    sample-domain output regardless.
     """
     from scipy.ndimage import minimum_filter1d, uniform_filter1d
+    from scipy.signal import resample_poly
 
     arr = audio.astype(np.float32)
     flat = arr.ndim == 1
     if flat:
         arr = arr.reshape(-1, 1)
 
-    envelope = np.max(np.abs(arr), axis=1)
+    n = arr.shape[0]
+    if n == 0:
+        return audio.astype(np.float32)
+
+    sample_envelope = np.max(np.abs(arr), axis=1)
+
+    true_peak = np.max(np.abs(resample_poly(arr, oversample, 1, axis=0)), axis=1)
+    usable = (len(true_peak) // oversample) * oversample
+    folded = np.max(true_peak[:usable].reshape(-1, oversample), axis=1)
+    if len(folded) < n:
+        folded = np.pad(folded, (0, n - len(folded)), mode="edge")
+    envelope = np.maximum(sample_envelope, folded[:n])
+
     if envelope.size == 0 or float(envelope.max()) <= ceiling:
         return audio.astype(np.float32)
 
