@@ -145,8 +145,12 @@ def _morph_mono(
 
     pos = 0
     while pos + frame_len <= n:
-        fa = sig_a[pos : pos + frame_len].astype(np.float64)
-        fb = sig_b[pos : pos + frame_len].astype(np.float64)
+        # Windowed before the LPC fit — an unwindowed (rectangular) frame leaks
+        # energy across bins and gives a rougher formant estimate, which shows
+        # up as buzz right at each frame boundary. vocoder.py already does this;
+        # this plugin didn't.
+        fa = sig_a[pos : pos + frame_len].astype(np.float64) * window
+        fb = sig_b[pos : pos + frame_len].astype(np.float64) * window
 
         try:
             lpc_a = librosa.lpc(fa, order=order).astype(np.float64)
@@ -161,8 +165,11 @@ def _morph_mono(
             # Silent frame or numerical failure → linear blend
             synth = (1.0 - t) * fa + t * fb
 
+        # Frame is now windowed twice (once for analysis, once for the OLA
+        # below), so the overlap-add normalises by the window's square — same
+        # scheme as vocoder.py.
         out[pos : pos + frame_len]     += synth * window
-        weights[pos : pos + frame_len] += window
+        weights[pos : pos + frame_len] += window ** 2
         pos += hop_len
 
     # Remaining tail shorter than one full frame

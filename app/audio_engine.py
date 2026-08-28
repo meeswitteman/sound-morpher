@@ -8,6 +8,19 @@ import sounddevice as sd
 import soundfile as sf
 
 
+def _remove_dc_offset(audio: np.ndarray, sample_rate: int, cutoff_hz: float = 20.0) -> np.ndarray:
+    """High-pass at `cutoff_hz` to strip DC bias and sub-audio rumble.
+
+    Recorded input especially tends to carry a DC offset. Left in, it eats into
+    the export limiter's headroom and can click at step boundaries where two
+    different DC levels butt up against each other across a morph.
+    """
+    import scipy.signal as sig
+
+    b, a = sig.butter(1, cutoff_hz, btype="highpass", fs=sample_rate)
+    return sig.lfilter(b, a, audio, axis=0).astype(np.float32)
+
+
 def _resample(audio: np.ndarray, src_sr: int, target_sr: int) -> np.ndarray:
     """Sample-rate conversion, best available quality.
 
@@ -70,6 +83,7 @@ class AudioEngine:
         target_channels: int = 2,
     ) -> np.ndarray:
         """Resample and adjust channel count to match project settings."""
+        audio = _remove_dc_offset(audio, src_sr)
         if src_sr != target_sr:
             audio = _resample(audio, src_sr, target_sr)
 
