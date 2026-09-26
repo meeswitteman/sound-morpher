@@ -5,7 +5,13 @@ from typing import Any
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
-from plugins.base import MorphPlugin, dtw_align, match_lengths, match_step_loudness
+from plugins.base import (
+    MorphPlugin,
+    dtw_align,
+    limit_peaks,
+    match_lengths,
+    match_step_loudness,
+)
 
 
 class _Signals(QObject):
@@ -75,6 +81,11 @@ class _Worker(QRunnable):
                 result = match_step_loudness(
                     result, a, b, sample_rate=self._sample_rate
                 )
+            else:
+                # Without level matching nothing else guards the ceiling, and a
+                # float export would carry overs straight into the file. The
+                # limiter returns steps that are already under it untouched.
+                result = [limit_peaks(s, self._sample_rate) for s in result]
             self.signals.finished.emit(result)
         except Exception as exc:
             self.signals.error.emit(str(exc))

@@ -52,6 +52,16 @@ Match** on when using `log`.
 
 ### Level Match and peaks
 
+Loudness is measured as ITU-R BS.1770 integrated loudness (LUFS): K-weighted,
+so a step with more low end is not mistaken for a louder one, and gated, so
+silent stretches inside a step do not make it read quiet. The target runs in a
+straight line in LUFS from A to B, which makes every step the same perceived
+step; if one end is silent it runs linearly in amplitude instead, so the fade
+still reaches nothing. Each step's gain is capped at 12 dB either way.
+Spectral FFT between sources whose spectra hardly overlap (a dark pad into a
+bright hiss, say) can lose more than that mid-sequence, and those steps then
+stay somewhat quiet rather than having their noise floor pulled up.
+
 After each step is scaled onto the loudness curve, peaks are handled in two
 stages. A single shared gain comes first, up to 3 dB, because one gain across the
 whole set is transparent and keeps the relative levels intact. Beyond that a
@@ -72,6 +82,48 @@ inharmonic or noisy material and the contour then warbles. On the bundled bell
 samples, for instance, tracking spreads over a 2.6× range with several octave
 jumps, which `median` sidesteps entirely.
 
+### Formants
+
+Pitch Shift takes a **Formants** setting. `preserve` (default) keeps each
+sound's own resonances while its pitch moves, so a voice stays the same size
+and an instrument keeps its body instead of turning into a "chipmunk". It
+estimates each source's spectral envelope once (a true-envelope cepstral
+estimate), and after every shift multiplies the spectrum by the ratio of the
+source envelope to the same envelope stretched by the shift. On synthetic
+vowels that brings the harmonic levels from 13-23 dB off the source's formant
+curve to 3-10 dB. It roughly doubles the plugin's run time. `shift` lets the
+resonances move with the pitch, as before.
+
+### Transients
+
+Spectral FFT and Griffin-Lim take a **Transients** setting. One FFT size cannot
+suit both halves of a sound: long frames resolve partials but smear every
+attack into pre-echo, short frames keep attacks sharp but blur the partials.
+`preserve` (default) splits each source once into a tonal and a transient
+layer (harmonic/percussive separation; the transient layer is the exact
+remainder, so the two always sum back to the source). The tonal layer morphs at
+the chosen FFT size, the transient layer at about 6 ms. On isolated drum hits
+that cuts the pre-echo before each hit by 12-26 dB, and attacks rise in under
+2 ms instead of 5-11 ms. Steady material comes out practically unchanged.
+Spectral FFT takes about 3 s longer on 8 steps of 5 s stereo, Griffin-Lim about
+7 s. `smear` morphs everything at one size, as before.
+
+### Resampling and phase locking
+
+Every path that changes pitch or timing (Pitch Shift in both modes, Granular's
+pitch jitter, DTW Align) shares the same two building blocks:
+
+- **Band-limited reads.** Fractional sample positions are read through a
+  Kaiser-windowed sinc, or through soxr where the rate is constant. Linear
+  interpolation used to cost about 7 dB at 15 kHz and let aliasing through
+  almost unattenuated when reading faster than 1.0; the sinc lowers its cutoff
+  with the rate and keeps aliasing around 90 dB down.
+- **Phase-locked vocoder.** The phase vocoder uses identity phase locking
+  (Laroche & Dolson): only spectral peaks advance their phase independently,
+  and the bins around each peak keep their phase relationship to it. That
+  removes most of the hollow, "phasey" smear of a plain vocoder, measured as
+  10 to 18 dB less energy between the harmonics when stretching or shifting up.
+
 ### Channels
 
 Both vocoders take a **Channels** setting. `stereo` (default) analyses and
@@ -79,17 +131,49 @@ synthesises each channel so the stereo image survives; the WORLD vocoder shares
 one pitch track across channels, since estimating F0 per channel lets them drift
 apart into a chorus. `mono` downmixes first and is roughly twice as fast.
 
+### WORLD pitch detector
+
+The WORLD vocoder takes a **Pitch detector** setting. `harvest` (default) keeps
+notes voiced through noise, breath and vibrato. `dio` is about 7× faster to
+analyse and just as accurate on clean recordings, but on noisy material it
+dropped 10 to 20 % of the frames inside a note, which WORLD then rebuilds from
+noise as crackle. The analysis runs once per morph, not once per step, so
+Harvest's extra cost stays small.
+
+---
+
+## Loading sources
+
+Every loaded sound is conditioned before it reaches a plugin:
+
+- **Hot float WAVs are scaled, not clipped.** A 32-bit float file can peak
+  above full scale. The whole file is scaled down to a peak of 1.0, which keeps
+  the waveform intact, and the status bar says by how many dB.
+- **DC offset is removed** with a zero-phase high-pass at 5 Hz. It has no gain
+  at DC, costs 0.5 dB at 20 Hz and 0.2 dB at 30 Hz, and leaves the phase of
+  kicks and bass untouched.
+- **Sample-rate conversion** uses soxr at its highest quality setting.
+
 ---
 
 ## Export
 
 Steps are written as `morph_step_01.wav` … `morph_step_NN.wav` at the project's
-sample rate and bit depth. 16-bit exports get TPDF dither, which turns the
+sample rate and bit depth. Choose 16-bit, 24-bit or 32-bit float under
+**Project → Export Bit Depth**; new projects start from the last choice. Use
+24-bit or float when the steps go into a DAW or sampler for further work.
+
+16-bit exports get TPDF dither, which turns the
 quantiser's signal-dependent distortion into an ordinary noise floor — most
 audible on the fades and tails a morph sequence is full of. Toggle it under
 **Project → Dither 16-bit Exports**; turn it off when the steps feed further
-processing, so dither is applied only once at the very end. 24-bit exports are
-never dithered, as the quantisation already sits below anything audible.
+processing, so dither is applied only once at the very end. 24-bit and float
+exports are never dithered, as the quantisation already sits below anything
+audible.
+
+The export bit depth only applies to the exported files. Audio inside a
+`.smorph` project is always stored as 32-bit float, so saving and reopening a
+project never costs quality.
 
 ---
 

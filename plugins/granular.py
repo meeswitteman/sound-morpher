@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from plugins.base import MorphPlugin, PluginParam, match_lengths
+from plugins.base import MorphPlugin, PluginParam, match_lengths, read_bandlimited
 
 
 class GranularPlugin(MorphPlugin):
@@ -207,8 +207,31 @@ def _read_grain(
             seg = np.pad(seg, ((0, length - len(seg)), (0, 0)))
         return seg
 
-    idx = np.clip(start + np.arange(length) * rate, 0.0, n - 1.0)
-    lo = np.floor(idx).astype(np.int64)
-    hi = np.minimum(lo + 1, n - 1)
-    frac = (idx - lo)[:, np.newaxis].astype(np.float32)
-    return src[lo] * (1.0 - frac) + src[hi] * frac
+    # Band-limited read: a linear read dulls the grain's top end and, when
+    # reading faster than 1.0, folds everything above the new Nyquist back down
+    # as aliasing.
+    try:
+        import soxr
+    except ImportError:
+        idx = np.clip(start + np.arange(length) * rate, 0.0, n - 1.0)
+        return read_bandlimited(src, idx, rate)
+
+    # The rate is constant within a grain, so a polyphase resampler does the
+    # job at a fraction of the cost of the general sinc reader: ~0.6 ms per
+    # grain against ~10 ms, and granular reads hundreds of grains per step.
+    # A margin of source on both sides keeps soxr's edge transient out of the
+    # grain; at 256 samples the result matches the sinc reader to ~-90 dB.
+    # soxr output j sits at source position lo + j * rate, so the grain starts
+    # up to one sample early. Next to the random position jitter that is
+    # inaudible, and cheaper than a fractional-delay correction.
+    j0 = int(round(_GRAIN_MARGIN / rate))
+    lo = int(np.floor(start - j0 * rate))
+    seg_len = int(np.ceil(length * rate + j0 * rate)) + 1 + _GRAIN_MARGIN
+    seg = src[np.clip(np.arange(lo, lo + seg_len), 0, n - 1)].astype(np.float32)
+    out = soxr.resample(seg, rate, 1.0, quality="VHQ")[j0 : j0 + length]
+    if len(out) < length:
+        out = np.pad(out, ((0, length - len(out)), (0, 0)), mode="edge")
+    return out.astype(np.float32)
+
+
+_GRAIN_MARGIN = 256

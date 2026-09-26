@@ -10,7 +10,7 @@ import soundfile as sf
 
 from app.project_state import ProjectState
 
-_FORMAT_VERSION = "1.0"
+_FORMAT_VERSION = "1.1"   # 1.1: embedded audio stored as 32-bit float
 _SMORPH_FILTER  = "Sound Morpher Project (*.smorph);;All files (*)"
 
 
@@ -52,17 +52,17 @@ class ProjectFile:
                 if state.audio_a is not None:
                     zf.writestr(
                         "audio/source_a.wav",
-                        _to_wav_bytes(state.audio_a, state.sample_rate, state.bit_depth),
+                        _to_wav_bytes(state.audio_a, state.sample_rate),
                     )
                 if state.audio_b is not None:
                     zf.writestr(
                         "audio/source_b.wav",
-                        _to_wav_bytes(state.audio_b, state.sample_rate, state.bit_depth),
+                        _to_wav_bytes(state.audio_b, state.sample_rate),
                     )
                 for i, step in enumerate(state.morph_steps):
                     zf.writestr(
                         f"audio/step_{i + 1:02d}.wav",
-                        _to_wav_bytes(step, state.sample_rate, state.bit_depth),
+                        _to_wav_bytes(step, state.sample_rate),
                     )
         except OSError as exc:
             raise ProjectFileError(f"Cannot write project file: {exc}") from exc
@@ -122,10 +122,16 @@ class ProjectFile:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _to_wav_bytes(audio: np.ndarray, sr: int, bit_depth: int) -> bytes:
-    subtype = "PCM_16" if bit_depth <= 16 else "PCM_24"
+def _to_wav_bytes(audio: np.ndarray, sr: int) -> bytes:
+    """Encode audio for embedding in a project archive.
+
+    Always 32-bit float, independent of the export bit depth. The project file
+    is working storage: quantising to 16 bit here (without dither) lost quality
+    on every save/load round trip, and clipped anything above full scale. The
+    export bit depth only applies when the steps leave the app.
+    """
     buf = io.BytesIO()
-    sf.write(buf, audio, sr, format="WAV", subtype=subtype)
+    sf.write(buf, audio, sr, format="WAV", subtype="FLOAT")
     return buf.getvalue()
 
 

@@ -9,7 +9,10 @@ from plugins.base import (
     interp_magnitude,
     interp_phase,
     match_lengths,
+    split_transients,
+    transient_fft_size,
 )
+from plugins.spectral_fft import TRANSIENTS_PARAM
 
 _FFT_CHOICES = ["256", "512", "1024", "2048", "4096"]
 
@@ -72,6 +75,7 @@ class GriffinLimPlugin(MorphPlugin):
                 "turn off for the classic smeared, fully synthetic character."
             ),
         ),
+        TRANSIENTS_PARAM,
     ]
 
     def morph(
@@ -85,6 +89,7 @@ class GriffinLimPlugin(MorphPlugin):
         n_iter: int = 32,
         magnitude: str = "log",
         seed_phase: bool = True,
+        transients: str = "preserve",
         **_: object,
     ) -> list[np.ndarray]:
         n_fft = int(fft_size)
@@ -92,6 +97,13 @@ class GriffinLimPlugin(MorphPlugin):
 
         a, b = match_lengths(audio_a, audio_b)
         channels = a.shape[1] if a.ndim == 2 else 1
+
+        # See SpectralFftPlugin: split once, morph each layer at its own size.
+        short = transient_fft_size(sample_rate)
+        layered = transients == "preserve" and n_fft > short
+        if layered:
+            tonal_a, trans_a = split_transients(a, sample_rate)
+            tonal_b, trans_b = split_transients(b, sample_rate)
 
         result: list[np.ndarray] = []
         for i in range(steps):
@@ -103,6 +115,19 @@ class GriffinLimPlugin(MorphPlugin):
                 result.append(a.astype(np.float32))
             elif t >= 1.0:
                 result.append(b.astype(np.float32))
+            elif layered:
+                tonal = _griffin_lim_mix(
+                    tonal_a, tonal_b, t, n_fft, hop, n_iter, channels, magnitude, seed_phase
+                )
+                # Short frames seeded with the sources' phase converge almost at
+                # once: 8 iterations measured the same pre-echo as 32 at a
+                # quarter of the cost, and with 4x the frames of the tonal
+                # layer that cost is what doubled the plugin's run time.
+                hits = _griffin_lim_mix(
+                    trans_a, trans_b, t, short, short // 4, min(n_iter, 8), channels,
+                    magnitude, seed_phase,
+                )
+                result.append((tonal + hits).astype(np.float32))
             else:
                 result.append(
                     _griffin_lim_mix(

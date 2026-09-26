@@ -217,12 +217,26 @@ def match_step_loudness(
     max_trim_db: float = 3.0,
     sample_rate: int = 44100,
 ) -> list[np.ndarray]:
-    """Scale each step so its RMS tracks a straight line from A's RMS to B's.
+    """Scale each step so its loudness tracks a straight line from A's to B's.
 
     Blending two uncorrelated signals costs ~3 dB in the middle of the sequence,
     and geometric-mean spectral interpolation costs more still, so intermediate
     steps arrive audibly thinner than the endpoints. This restores the intended
     loudness curve.
+
+    Loudness is ITU-R BS.1770 integrated loudness (LUFS), not plain RMS. RMS
+    weighs every frequency alike, so a step with more low end than its
+    neighbours read as louder than it sounds and was turned down, and one with
+    more presence-range energy was turned up: the sequence rose and dipped in
+    perceived level wherever the spectrum shifted, which is exactly what a morph
+    does. The K-weighting follows the ear instead, and the gating ignores the
+    silent stretches that would otherwise make a sparse step read quiet.
+
+    The target runs in a straight line in LUFS, so each step is the same
+    perceived step louder or quieter. Where one end is silent a line in dB
+    cannot reach it, so the target then runs linearly in amplitude instead,
+    which still fades cleanly to nothing. Steps with nothing measurable, and
+    content the ear does not weigh at all such as DC, are left alone.
 
     Peaks are then handled in two stages. First a single shared gain, up to
     `max_trim_db`, because one gain across the whole set is transparent and keeps
@@ -235,21 +249,25 @@ def match_step_loudness(
     if not steps:
         return steps
 
-    rms_a = _rms(audio_a)
-    rms_b = _rms(audio_b)
-    max_gain = 10.0 ** (max_gain_db / 20.0)
+    lufs_a = integrated_loudness(audio_a, sample_rate)
+    lufs_b = integrated_loudness(audio_b, sample_rate)
+    both_audible = np.isfinite(lufs_a) and np.isfinite(lufs_b)
     n = len(steps)
 
     scaled: list[np.ndarray] = []
     for i, step in enumerate(steps):
         t = i / (n - 1) if n > 1 else 0.0
-        target = (1.0 - t) * rms_a + t * rms_b
-        current = _rms(step)
-        if current < 1e-9 or target < 1e-9:
+        if both_audible:
+            target = (1.0 - t) * lufs_a + t * lufs_b
+        else:
+            amp = (1.0 - t) * _db_to_amp(lufs_a) + t * _db_to_amp(lufs_b)
+            target = 20.0 * np.log10(amp) if amp > 0.0 else -np.inf
+        current = integrated_loudness(step, sample_rate)
+        if not (np.isfinite(current) and np.isfinite(target)):
             scaled.append(step)
             continue
-        gain = np.clip(target / current, 1.0 / max_gain, max_gain)
-        scaled.append((step * gain).astype(np.float32))
+        gain_db = float(np.clip(target - current, -max_gain_db, max_gain_db))
+        scaled.append((step * 10.0 ** (gain_db / 20.0)).astype(np.float32))
 
     peak = max((float(np.max(np.abs(s))) for s in scaled), default=0.0)
     if peak > ceiling:
@@ -339,10 +357,82 @@ def limit_peaks(
     return (out.ravel() if flat else out).astype(np.float32)
 
 
-def _rms(audio: np.ndarray) -> float:
-    if audio.size == 0:
-        return 0.0
-    return float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+def _db_to_amp(db: float) -> float:
+    return 10.0 ** (db / 20.0) if np.isfinite(db) else 0.0
+
+
+def k_weighting(sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
+    """BS.1770 K-weighting as one 4th-order filter (b, a) at any sample rate.
+
+    The standard publishes the two stages as biquad coefficients for 48 kHz
+    only. These are the analogue prototypes fitted to them (a +4 dB high shelf
+    around 1.7 kHz for the head's acoustic effect, and a high-pass around
+    38 Hz, the "revised low-frequency B" curve; B. De Man's derivation), taken
+    back through the bilinear transform. That reproduces the published 48 kHz
+    coefficients to ~1e-8 and holds at any rate.
+    """
+    # Stage 1: high shelf.
+    gain_db, q, fc = 3.999843853973347, 0.7071752369554196, 1681.974450955533
+    k = np.tan(np.pi * fc / sample_rate)
+    vh = 10.0 ** (gain_db / 20.0)
+    vb = vh ** 0.4996667741545416
+    a0 = 1.0 + k / q + k * k
+    b1 = np.array([vh + vb * k / q + k * k, 2.0 * (k * k - vh), vh - vb * k / q + k * k]) / a0
+    a1 = np.array([1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0])
+    # Stage 2: high pass. The standard's numerator is exactly [1, -2, 1].
+    q, fc = 0.5003270373238773, 38.13547087602444
+    k = np.tan(np.pi * fc / sample_rate)
+    a0 = 1.0 + k / q + k * k
+    b2 = np.array([1.0, -2.0, 1.0])
+    a2 = np.array([1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0])
+
+    return np.convolve(b1, b2), np.convolve(a1, a2)
+
+
+def integrated_loudness(audio: np.ndarray, sample_rate: int) -> float:
+    """ITU-R BS.1770-4 integrated loudness in LUFS; -inf when nothing is audible.
+
+    K-weighted mean square over 400 ms blocks with 75 % overlap, then two
+    gates: blocks under -70 LUFS are dropped outright, then blocks more than
+    10 LU under the loudness of what is left. Channels are summed with unit
+    weight, as the standard does for left and right.
+
+    Morph steps are often shorter than one block. Those are measured as a
+    single block over their whole length, which is what the gated measure
+    converges to for a short, steady sound.
+    """
+    from scipy.signal import lfilter
+
+    arr = np.asarray(audio, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    n = arr.shape[0]
+    if n == 0:
+        return -np.inf
+
+    b, a = k_weighting(sample_rate)
+    weighted = lfilter(b, a, arr, axis=0)
+    power = np.sum(weighted ** 2, axis=1)   # summed over channels, per sample
+
+    block = int(round(0.4 * sample_rate))
+    step = int(round(0.1 * sample_rate))
+    if n <= block:
+        z = np.array([power.mean()])
+    else:
+        # Mean square of every block via a cumulative sum, O(n).
+        csum = np.concatenate([[0.0], np.cumsum(power)])
+        starts = np.arange(0, n - block + 1, step)
+        z = (csum[starts + block] - csum[starts]) / block
+
+    with np.errstate(divide="ignore"):
+        block_lufs = -0.691 + 10.0 * np.log10(z)
+    kept = z[block_lufs > -70.0]
+    if kept.size == 0:
+        return -np.inf
+    relative_gate = -0.691 + 10.0 * np.log10(kept.mean()) - 10.0
+    with np.errstate(divide="ignore"):
+        kept = kept[-0.691 + 10.0 * np.log10(kept) > relative_gate]
+    return float(-0.691 + 10.0 * np.log10(kept.mean()))
 
 
 # ── Utility shared across plugins ─────────────────────────────────────────────
@@ -406,11 +496,10 @@ def dtw_align(
     varispeed, so wherever the path departs from the diagonal the pitch slides
     with it. It is kept only for comparison.
 
-    If librosa or scipy are unavailable, falls back to returning the originals.
+    If librosa is unavailable, falls back to returning the originals.
     """
     try:
         import librosa
-        from scipy.interpolate import interp1d
     except ImportError:
         return a, b
 
@@ -443,10 +532,8 @@ def dtw_align(
     src_b = np.clip(np.interp(out_idx, path_idx, centers_b), 0, len(b) - 1)
 
     def _resample(signal: np.ndarray, src: np.ndarray) -> np.ndarray:
-        x = np.arange(len(signal), dtype=np.float64)
-        f = interp1d(x, signal.astype(np.float64),
-                     bounds_error=False, fill_value=(float(signal[0]), float(signal[-1])))
-        return f(src).astype(np.float32)
+        speed = np.gradient(src) if len(src) > 1 else 1.0
+        return read_bandlimited(signal, src, speed)
 
     _warp = _resample if mode == "resample" else (
         lambda signal, src: _stretch_to_time_map(signal, src, hop_length)
@@ -479,12 +566,10 @@ def _stretch_to_time_map(
     sig = signal.astype(np.float32)
 
     if len(sig) < n_fft:
-        # Too short for a meaningful STFT; the naive read is all that is left.
+        # Too short for a meaningful STFT; a direct read is all that is left.
         idx = np.clip(src, 0, len(sig) - 1)
-        lo = np.floor(idx).astype(np.int64)
-        hi = np.minimum(lo + 1, len(sig) - 1)
-        frac = idx - lo
-        return (sig[lo] * (1.0 - frac) + sig[hi] * frac).astype(np.float32)
+        speed = np.gradient(idx) if len(idx) > 1 else 1.0
+        return read_bandlimited(sig, idx, speed)
 
     D = librosa.stft(sig, n_fft=n_fft, hop_length=hop_length)
     n_frames = D.shape[1]
@@ -497,6 +582,94 @@ def _stretch_to_time_map(
     warped = _phase_vocoder(D, time_map, hop_length, n_fft)
     out = librosa.istft(warped, hop_length=hop_length, n_fft=n_fft, length=n_out)
     return out.astype(np.float32)
+
+
+def read_bandlimited(
+    signal: np.ndarray,
+    positions: np.ndarray,
+    rate: float | np.ndarray = 1.0,
+    half_width: int = 16,
+    beta: float = 8.6,
+    chunk: int = 8192,
+) -> np.ndarray:
+    """Read `signal` at fractional sample `positions` through a windowed sinc.
+
+    Linear interpolation between two neighbours is a poor reconstruction filter:
+    it rolls off the top octave (about -4 dB at a quarter of the sample rate
+    and much more above) and lets spectral images through as aliasing. Both are
+    audible on anything bright. A Kaiser-windowed sinc with `half_width` zero
+    crossings each side is flat to near Nyquist and keeps images ~80 dB down.
+
+    `rate` is the local playback speed, scalar or one value per position. Where
+    it exceeds 1 the read decimates, so the kernel's cutoff is lowered to
+    1/rate of Nyquist and widened to match: the content that would otherwise
+    fold back down as aliasing is filtered out first.
+
+    Positions outside the signal hold the edge sample, as the linear read did.
+    Accepts (n,) or (n, channels); returns float32 of the same layout.
+
+    The kernel at cutoff c and distance d is c * g(c * d), with g the windowed
+    sinc at full bandwidth. So one finely sampled table of g serves every
+    cutoff, instead of evaluating a Bessel function per tap.
+    """
+    per_crossing, table = _windowed_sinc_table(half_width, beta)
+    last = len(table) - 1
+
+    sig = np.asarray(signal, dtype=np.float64)
+    flat = sig.ndim == 1
+    if flat:
+        sig = sig.reshape(-1, 1)
+    pos = np.asarray(positions, dtype=np.float64).ravel()
+    n = sig.shape[0]
+    out = np.zeros((len(pos), sig.shape[1]), dtype=np.float64)
+    if n == 0 or len(pos) == 0:
+        return (out.ravel() if flat else out).astype(np.float32)
+
+    speed = np.abs(np.broadcast_to(np.asarray(rate, dtype=np.float64), pos.shape))
+    cutoff = np.minimum(1.0, 1.0 / np.maximum(speed, 1e-6))
+
+    for s in range(0, len(pos), chunk):
+        p = pos[s : s + chunk]
+        c = cutoff[s : s + chunk, np.newaxis]
+        reach = int(np.ceil(half_width / float(c.min())))
+        base = np.floor(p).astype(np.int64)
+        idx = base[:, np.newaxis] + np.arange(-reach + 1, reach + 1)[np.newaxis, :]
+        # Linear lookup into the uniform table; positions past the kernel's
+        # support clamp onto its end points, which are zero.
+        f = np.clip(((p[:, np.newaxis] - idx) * c + half_width) * per_crossing, 0.0, last)
+        i = np.minimum(f.astype(np.int64), last - 1)
+        frac = f - i
+        kernel = table[i] * (1.0 - frac) + table[i + 1] * frac
+        # Unity gain at DC regardless of truncation or where the position falls.
+        # This also absorbs the factor c in front of g.
+        kernel /= kernel.sum(axis=1, keepdims=True)
+        taps = sig[np.clip(idx, 0, n - 1)]
+        out[s : s + chunk] = np.einsum("mt,mtc->mc", kernel, taps)
+
+    return (out.ravel() if flat else out).astype(np.float32)
+
+
+_SINC_TABLES: dict[tuple[int, float], tuple[int, np.ndarray]] = {}
+
+
+def _windowed_sinc_table(
+    half_width: int, beta: float, per_crossing: int = 1024
+) -> tuple[int, np.ndarray]:
+    """Kaiser-windowed sinc sampled `per_crossing` times per zero crossing.
+
+    Entry j holds the kernel at x = j / per_crossing - half_width. Linear
+    interpolation into a table this fine is accurate to well below the
+    kernel's own ~80 dB stopband.
+    """
+    key = (half_width, beta)
+    if key not in _SINC_TABLES:
+        from scipy.special import i0
+
+        grid = np.linspace(-half_width, half_width, 2 * half_width * per_crossing + 1)
+        u = grid / half_width
+        window = i0(beta * np.sqrt(np.clip(1.0 - u * u, 0.0, None))) / i0(beta)
+        _SINC_TABLES[key] = (per_crossing, np.sinc(grid) * window)
+    return _SINC_TABLES[key]
 
 
 def pitch_shift_varying(
@@ -532,11 +705,245 @@ def pitch_shift_varying(
     )
     stretched = _stretch_to_time_map(signal, src, hop_length)
 
+    # The varispeed read is a resampling step, so it needs a real anti-aliasing
+    # reconstruction filter: shifting up decimates, and a linear read folds the
+    # top of the spectrum back down while dulling what stays.
+    if np.ptp(ratio) < 1e-9 and len(stretched) > 1:
+        # Constant ratio: a polyphase resampler does the same job much faster.
+        # Output sample j lands on stretched sample j * ratio, as the map says.
+        out = _resample_constant(stretched, float(ratio[0]))
+        if len(out) < n:
+            out = np.pad(out, (0, n - len(out)), mode="edge")
+        return out[:n].astype(np.float32)
+
     idx = np.clip(read, 0.0, len(stretched) - 1.0)
-    lo = np.floor(idx).astype(np.int64)
-    hi = np.minimum(lo + 1, len(stretched) - 1)
-    frac = idx - lo
-    return (stretched[lo] * (1.0 - frac) + stretched[hi] * frac).astype(np.float32)
+    return read_bandlimited(stretched, idx, ratio)
+
+
+def spectral_envelope(
+    log_mag: np.ndarray,
+    n_ceps: int,
+    iterations: int = 8,
+) -> np.ndarray:
+    """True-envelope estimate of log-magnitude spectra, one column per frame.
+
+    A plain cepstral lifter smooths the log spectrum, which for a harmonic
+    sound means averaging peaks with the valleys between them: the envelope
+    sags, and sags more the sparser the harmonics are. That bias differs
+    between a sound and its pitch-shifted copy, so it would leak into any
+    correction built from the two. The true envelope (Imai; Röbel & Rodet)
+    iterates instead: smooth, lift every bin to at least the smoothed value,
+    smooth again. The result rests on the harmonic peaks.
+
+    `n_ceps` is the lifter cutoff in cepstral samples. It must stay below the
+    pitch period in samples, or the envelope starts tracing the harmonics
+    themselves.
+
+    Eight iterations land within 0.1 dB of twenty-four on harmonic test
+    vowels, at a third of the cost: the first few do nearly all the lifting.
+    """
+    n_fft = 2 * (log_mag.shape[0] - 1)
+    # Flat for the first half of the cepstral range, then a half-cosine down
+    # to zero. A hard cutoff rings (Gibbs) around any cliff in the spectrum,
+    # such as the drop above a sound's top harmonic, and that ripple reached
+    # far enough into the band to cut a shifted tone's fundamental.
+    weights = np.ones(n_ceps)
+    start = n_ceps // 2
+    ramp = np.arange(n_ceps - start) / max(1, n_ceps - start)
+    weights[start:] = 0.5 * (1.0 + np.cos(np.pi * ramp))
+    lifter = np.zeros(n_fft)
+    lifter[:n_ceps] = weights
+    lifter[n_fft - n_ceps + 1 :] = weights[1:][::-1]
+
+    def smooth(x: np.ndarray) -> np.ndarray:
+        cep = np.fft.irfft(x, n=n_fft, axis=0)
+        return np.fft.rfft(cep * lifter[:, np.newaxis], axis=0).real
+
+    target = log_mag.copy()
+    env = smooth(target)
+    for _ in range(iterations):
+        target = np.maximum(target, env)
+        env = smooth(target)
+    return env
+
+
+def transient_fft_size(sample_rate: int) -> int:
+    """FFT size for the transient layer: ~6 ms, a power of two."""
+    return int(2 ** round(np.log2(256 * sample_rate / 44100)))
+
+
+def split_transients(
+    audio: np.ndarray,
+    sample_rate: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split audio into a tonal layer and a transient layer that sum back exactly.
+
+    A spectral morph has to pick one FFT size, and no size suits both halves of
+    a sound. Long frames resolve partials but smear every attack over the whole
+    frame, as pre-echo before the hit and a blur after it; short frames keep
+    attacks sharp but cannot separate partials. Splitting first lets each
+    layer be morphed at the size that suits it.
+
+    The split is harmonic/percussive separation (Fitzgerald's median filtering,
+    via librosa): energy that is steady over time goes to the tonal layer,
+    energy that is broadband and brief goes to the transient layer. Only the
+    tonal layer is reconstructed from the masked STFT; the transient layer is
+    the exact remainder, so the two always add up to the input sample for
+    sample and nothing is lost to the split itself.
+
+    Accepts (n,) or (n, channels) and returns the same layout, in float32.
+    Signals too short for one analysis frame come back entirely tonal.
+    """
+    import librosa
+
+    arr = np.asarray(audio, dtype=np.float32)
+    flat = arr.ndim == 1
+    if flat:
+        arr = arr.reshape(-1, 1)
+    n = arr.shape[0]
+    n_fft = 2048 if sample_rate <= 50000 else 4096
+    hop = n_fft // 4
+
+    tonal = arr.copy()
+    if n >= n_fft:
+        for ch in range(arr.shape[1]):
+            D = librosa.stft(arr[:, ch], n_fft=n_fft, hop_length=hop)
+            harmonic, _ = librosa.decompose.hpss(D)
+            tonal[:, ch] = librosa.istft(harmonic, hop_length=hop, n_fft=n_fft, length=n)
+    transient = arr - tonal
+
+    if flat:
+        return tonal.ravel(), transient.ravel()
+    return tonal, transient
+
+
+def _formant_stft(sample_rate: int) -> tuple[int, dict]:
+    n_fft = 2048 if sample_rate <= 50000 else 4096
+    hop = n_fft // 4
+    return hop, dict(fs=sample_rate, nperseg=n_fft, noverlap=n_fft - hop, window="hann")
+
+
+def formant_envelope(
+    original: np.ndarray,
+    sample_rate: int,
+    f0_high: float,
+) -> np.ndarray | None:
+    """Log spectral envelope of a mono signal, one column per STFT frame.
+
+    Computed once per source; apply_formant_correction() then derives every
+    shifted version's correction from it. Returns None when the signal is too
+    short to analyse or there is no pitch to set the lifter by.
+
+    `f0_high` is the highest fundamental in `original` itself; a shift does
+    not matter here, since the shifted envelope is derived from this one. It
+    sets the lifter cutoff, which has to sit below the shortest pitch period
+    so the envelope does not trace individual harmonics.
+    """
+    from scipy.signal import stft
+
+    _, kwargs = _formant_stft(sample_rate)
+    n_fft = kwargs["nperseg"]
+    if len(original) < n_fft or f0_high <= 0.0:
+        return None
+
+    from scipy.ndimage import maximum_filter1d
+
+    _, _, O = stft(original.astype(np.float64), **kwargs)
+    mag = np.abs(O)
+    # Floor 100 dB under each frame's peak: synthetic or gated input has true
+    # zeros between harmonics, and log(0) would dominate the cepstrum.
+    floor = np.maximum(mag.max(axis=0, keepdims=True) * 1e-5, 1e-12)
+    log_mag = np.log(np.maximum(mag, floor))
+    # Peak-hold across one harmonic spacing first. Clean harmonic input has
+    # valleys tens of dB deep between the partials, far deeper than the true
+    # envelope can lift in a few iterations; it then sags between harmonics
+    # and the correction ends up cutting whatever lands in a sag, the
+    # fundamental of a shifted tone included. After the hold every bin sees
+    # a neighbouring peak, so the envelope rests on the harmonics as intended.
+    spacing = f0_high * n_fft / sample_rate
+    log_mag = maximum_filter1d(log_mag, size=int(np.ceil(spacing)) + 1, axis=0, mode="nearest")
+    # Lifter at 70 % of the shortest pitch period, clamped to a range where the
+    # envelope keeps formant detail without chasing harmonics.
+    n_ceps = int(np.clip(0.7 * sample_rate / f0_high, 12, n_fft // 8))
+    return spectral_envelope(log_mag, n_ceps)
+
+
+def apply_formant_correction(
+    shifted: np.ndarray,
+    envelope: np.ndarray | None,
+    ratio: float | np.ndarray,
+    sample_rate: int,
+    max_correction_db: float = 30.0,
+) -> np.ndarray:
+    """Give a pitch-shifted mono signal back its source's spectral envelope.
+
+    Resampling-based pitch shifting moves the formants along with the pitch:
+    a voice shifted up a fifth gets a head half its size (the "chipmunk"
+    effect), and an instrument's body resonances slide with every note.
+
+    The shift scales every frequency by `ratio`, envelope included: what sat
+    at f in the source sits at f * ratio in the shifted signal. So the shifted
+    envelope at f is the source envelope at f / ratio, and each frame is
+    multiplied by E(f) / E(f / ratio). The harmonics stay where the shift put
+    them, and the resonances go back where they were. Reading the shifted
+    envelope off the source's instead of re-estimating it costs one
+    interpolation per step rather than a second envelope analysis, and it
+    carries none of the estimation bias a sparser harmonic comb would add.
+
+    `ratio` is a constant, or one value per sample of `shifted` for a pitch
+    contour; timing is unchanged by the shift, so frames line up. The
+    correction is capped at `max_correction_db` either way.
+    """
+    ratio_arr = np.asarray(ratio, dtype=np.float64)
+    n = len(shifted)
+    if envelope is None or n == 0 or np.allclose(ratio_arr, 1.0):
+        return shifted.astype(np.float32)
+
+    from scipy.signal import istft, stft
+
+    hop, kwargs = _formant_stft(sample_rate)
+    _, _, S = stft(shifted.astype(np.float64), **kwargs)
+    frames = min(S.shape[1], envelope.shape[1])
+    S = S[:, :frames]
+    env = envelope[:, :frames]
+    n_bins = env.shape[0]
+
+    # Ratio at each frame centre (scipy pads by half a frame, so frame j is
+    # centred on sample j * hop).
+    if ratio_arr.ndim == 0:
+        frame_ratio = np.full(frames, float(ratio_arr))
+    else:
+        centres = np.minimum(np.arange(frames) * hop, len(ratio_arr) - 1)
+        frame_ratio = ratio_arr[centres]
+
+    # Source envelope read at bin k / ratio, linearly between bins.
+    pos = np.clip(np.arange(n_bins)[:, np.newaxis] / frame_ratio[np.newaxis, :], 0, n_bins - 1)
+    lo = np.minimum(pos.astype(np.int64), n_bins - 2)
+    frac = pos - lo
+    cols = np.arange(frames)[np.newaxis, :]
+    warped = env[lo, cols] * (1.0 - frac) + env[lo + 1, cols] * frac
+
+    limit = max_correction_db / 20.0 * np.log(10.0)
+    gain = np.exp(np.clip(env - warped, -limit, limit))
+
+    _, out = istft(S * gain, **kwargs)
+    out = out[:n]
+    if len(out) < n:
+        out = np.pad(out, (0, n - len(out)))
+    return out.astype(np.float32)
+
+
+def _resample_constant(signal: np.ndarray, speed: float) -> np.ndarray:
+    """Play `signal` back `speed` times faster, band-limited."""
+    try:
+        import soxr
+
+        return soxr.resample(
+            signal.astype(np.float32), speed, 1.0, quality="VHQ"
+        ).astype(np.float32)
+    except ImportError:
+        positions = np.arange(int(len(signal) / speed), dtype=np.float64) * speed
+        return read_bandlimited(signal, positions, speed)
 
 
 def _phase_vocoder(
@@ -544,11 +951,14 @@ def _phase_vocoder(
     time_map: np.ndarray,
     hop_length: int,
     n_fft: int,
+    phase_lock: bool = True,
 ) -> np.ndarray:
-    """Phase vocoder over an arbitrary time map.
+    """Phase vocoder over an arbitrary time map, with identity phase locking.
 
     librosa.phase_vocoder only takes a constant rate; DTW produces a rate that
     changes frame by frame, so the frame stepping is driven by `time_map` here.
+    It also has no phase locking, which is what `phase_lock` adds; see
+    _lock_phases. Turning it off gives the plain textbook vocoder.
     """
     n_bins = D.shape[0]
     # Phase a bin is expected to advance over one hop if its frequency sits
@@ -565,12 +975,50 @@ def _phase_vocoder(
     for i, step in enumerate(time_map):
         k = int(step)
         frac = step - k
-        out[:, i] = ((1.0 - frac) * mag[:, k] + frac * mag[:, k + 1]) * np.exp(1j * phase)
+        frame_mag = (1.0 - frac) * mag[:, k] + frac * mag[:, k + 1]
+        if phase_lock:
+            reference = ang[:, k] if frac < 0.5 else ang[:, k + 1]
+            phase = _lock_phases(frame_mag, phase, reference)
+        out[:, i] = frame_mag * np.exp(1j * phase)
 
         # Deviation from the expected advance = the bin's true instantaneous
         # frequency; accumulate that so partials stay put under any stretch.
         delta = ang[:, k + 1] - ang[:, k] - expected
         delta -= 2.0 * np.pi * np.round(delta / (2.0 * np.pi))
         phase = phase + expected + delta
+        # Keep the accumulator small; float precision degrades as it grows.
+        phase = (phase + np.pi) % (2.0 * np.pi) - np.pi
 
     return out
+
+
+def _lock_phases(
+    magnitude: np.ndarray,
+    phase: np.ndarray,
+    reference: np.ndarray,
+) -> np.ndarray:
+    """Identity phase locking (Laroche & Dolson, 1999).
+
+    A sinusoid does not live in one bin: the analysis window spreads it over
+    several, and in the input those bins keep a fixed phase relationship to the
+    peak. A plain phase vocoder advances every bin independently, which lets
+    that relationship drift. The partial then decorrelates from itself across
+    its own bins, heard as the typical hollow, "phasey", reverberant smear.
+
+    Here only spectral peaks keep their independently advanced phase. Every
+    other bin is assigned to its nearest peak and takes the peak's synthesis
+    phase plus the phase offset it had to that peak in the analysis frame,
+    restoring the shape each partial had in the input.
+    """
+    n_bins = len(magnitude)
+    if n_bins < 3:
+        return phase
+    interior = (magnitude[1:-1] > magnitude[:-2]) & (magnitude[1:-1] >= magnitude[2:])
+    peaks = np.flatnonzero(interior) + 1
+    if peaks.size == 0:
+        return phase
+    # Region of influence: each bin belongs to the nearest peak, with the
+    # boundary halfway between neighbouring peaks.
+    bounds = (peaks[:-1] + peaks[1:]) // 2
+    owner = peaks[np.searchsorted(bounds, np.arange(n_bins), side="right")]
+    return phase[owner] + reference - reference[owner]
