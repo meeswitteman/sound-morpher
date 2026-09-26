@@ -212,17 +212,20 @@ def _shift_channels(
     semitones: float,
     channels: int,
 ) -> np.ndarray:
-    import librosa
+    """Shift every channel by a fixed interval.
 
+    Goes through the same path as the dynamic mode, not librosa's pitch_shift:
+    librosa's phase vocoder has no phase locking, and its hollow, phasey smear
+    was the dominant artefact of this plugin on tonal material.
+    """
     if abs(semitones) < 0.01:
         return audio.copy()
 
+    ratio = 2.0 ** (semitones / 12.0)
     out_chs: list[np.ndarray] = []
     for ch in range(channels):
         sig = audio[:, ch] if channels > 1 else audio.ravel()
-        shifted = librosa.effects.pitch_shift(
-            sig.astype(np.float32), sr=sr, n_steps=semitones
-        )
+        shifted = pitch_shift_varying(sig, np.full(len(sig), ratio), _HOP)
         out_chs.append(shifted.astype(np.float32))
 
     if channels == 1:

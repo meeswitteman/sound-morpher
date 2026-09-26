@@ -72,6 +72,22 @@ inharmonic or noisy material and the contour then warbles. On the bundled bell
 samples, for instance, tracking spreads over a 2.6× range with several octave
 jumps, which `median` sidesteps entirely.
 
+### Resampling and phase locking
+
+Every path that changes pitch or timing (Pitch Shift in both modes, Granular's
+pitch jitter, DTW Align) shares the same two building blocks:
+
+- **Band-limited reads.** Fractional sample positions are read through a
+  Kaiser-windowed sinc, or through soxr where the rate is constant. Linear
+  interpolation used to cost about 7 dB at 15 kHz and let aliasing through
+  almost unattenuated when reading faster than 1.0; the sinc lowers its cutoff
+  with the rate and keeps aliasing around 90 dB down.
+- **Phase-locked vocoder.** The phase vocoder uses identity phase locking
+  (Laroche & Dolson): only spectral peaks advance their phase independently,
+  and the bins around each peak keep their phase relationship to it. That
+  removes most of the hollow, "phasey" smear of a plain vocoder, measured as
+  10 to 18 dB less energy between the harmonics when stretching or shifting up.
+
 ### Channels
 
 Both vocoders take a **Channels** setting. `stereo` (default) analyses and

@@ -406,11 +406,10 @@ def dtw_align(
     varispeed, so wherever the path departs from the diagonal the pitch slides
     with it. It is kept only for comparison.
 
-    If librosa or scipy are unavailable, falls back to returning the originals.
+    If librosa is unavailable, falls back to returning the originals.
     """
     try:
         import librosa
-        from scipy.interpolate import interp1d
     except ImportError:
         return a, b
 
@@ -443,10 +442,8 @@ def dtw_align(
     src_b = np.clip(np.interp(out_idx, path_idx, centers_b), 0, len(b) - 1)
 
     def _resample(signal: np.ndarray, src: np.ndarray) -> np.ndarray:
-        x = np.arange(len(signal), dtype=np.float64)
-        f = interp1d(x, signal.astype(np.float64),
-                     bounds_error=False, fill_value=(float(signal[0]), float(signal[-1])))
-        return f(src).astype(np.float32)
+        speed = np.gradient(src) if len(src) > 1 else 1.0
+        return read_bandlimited(signal, src, speed)
 
     _warp = _resample if mode == "resample" else (
         lambda signal, src: _stretch_to_time_map(signal, src, hop_length)
@@ -479,12 +476,10 @@ def _stretch_to_time_map(
     sig = signal.astype(np.float32)
 
     if len(sig) < n_fft:
-        # Too short for a meaningful STFT; the naive read is all that is left.
+        # Too short for a meaningful STFT; a direct read is all that is left.
         idx = np.clip(src, 0, len(sig) - 1)
-        lo = np.floor(idx).astype(np.int64)
-        hi = np.minimum(lo + 1, len(sig) - 1)
-        frac = idx - lo
-        return (sig[lo] * (1.0 - frac) + sig[hi] * frac).astype(np.float32)
+        speed = np.gradient(idx) if len(idx) > 1 else 1.0
+        return read_bandlimited(sig, idx, speed)
 
     D = librosa.stft(sig, n_fft=n_fft, hop_length=hop_length)
     n_frames = D.shape[1]
@@ -497,6 +492,94 @@ def _stretch_to_time_map(
     warped = _phase_vocoder(D, time_map, hop_length, n_fft)
     out = librosa.istft(warped, hop_length=hop_length, n_fft=n_fft, length=n_out)
     return out.astype(np.float32)
+
+
+def read_bandlimited(
+    signal: np.ndarray,
+    positions: np.ndarray,
+    rate: float | np.ndarray = 1.0,
+    half_width: int = 16,
+    beta: float = 8.6,
+    chunk: int = 8192,
+) -> np.ndarray:
+    """Read `signal` at fractional sample `positions` through a windowed sinc.
+
+    Linear interpolation between two neighbours is a poor reconstruction filter:
+    it rolls off the top octave (about -4 dB at a quarter of the sample rate
+    and much more above) and lets spectral images through as aliasing. Both are
+    audible on anything bright. A Kaiser-windowed sinc with `half_width` zero
+    crossings each side is flat to near Nyquist and keeps images ~80 dB down.
+
+    `rate` is the local playback speed, scalar or one value per position. Where
+    it exceeds 1 the read decimates, so the kernel's cutoff is lowered to
+    1/rate of Nyquist and widened to match: the content that would otherwise
+    fold back down as aliasing is filtered out first.
+
+    Positions outside the signal hold the edge sample, as the linear read did.
+    Accepts (n,) or (n, channels); returns float32 of the same layout.
+
+    The kernel at cutoff c and distance d is c * g(c * d), with g the windowed
+    sinc at full bandwidth. So one finely sampled table of g serves every
+    cutoff, instead of evaluating a Bessel function per tap.
+    """
+    per_crossing, table = _windowed_sinc_table(half_width, beta)
+    last = len(table) - 1
+
+    sig = np.asarray(signal, dtype=np.float64)
+    flat = sig.ndim == 1
+    if flat:
+        sig = sig.reshape(-1, 1)
+    pos = np.asarray(positions, dtype=np.float64).ravel()
+    n = sig.shape[0]
+    out = np.zeros((len(pos), sig.shape[1]), dtype=np.float64)
+    if n == 0 or len(pos) == 0:
+        return (out.ravel() if flat else out).astype(np.float32)
+
+    speed = np.abs(np.broadcast_to(np.asarray(rate, dtype=np.float64), pos.shape))
+    cutoff = np.minimum(1.0, 1.0 / np.maximum(speed, 1e-6))
+
+    for s in range(0, len(pos), chunk):
+        p = pos[s : s + chunk]
+        c = cutoff[s : s + chunk, np.newaxis]
+        reach = int(np.ceil(half_width / float(c.min())))
+        base = np.floor(p).astype(np.int64)
+        idx = base[:, np.newaxis] + np.arange(-reach + 1, reach + 1)[np.newaxis, :]
+        # Linear lookup into the uniform table; positions past the kernel's
+        # support clamp onto its end points, which are zero.
+        f = np.clip(((p[:, np.newaxis] - idx) * c + half_width) * per_crossing, 0.0, last)
+        i = np.minimum(f.astype(np.int64), last - 1)
+        frac = f - i
+        kernel = table[i] * (1.0 - frac) + table[i + 1] * frac
+        # Unity gain at DC regardless of truncation or where the position falls.
+        # This also absorbs the factor c in front of g.
+        kernel /= kernel.sum(axis=1, keepdims=True)
+        taps = sig[np.clip(idx, 0, n - 1)]
+        out[s : s + chunk] = np.einsum("mt,mtc->mc", kernel, taps)
+
+    return (out.ravel() if flat else out).astype(np.float32)
+
+
+_SINC_TABLES: dict[tuple[int, float], tuple[int, np.ndarray]] = {}
+
+
+def _windowed_sinc_table(
+    half_width: int, beta: float, per_crossing: int = 1024
+) -> tuple[int, np.ndarray]:
+    """Kaiser-windowed sinc sampled `per_crossing` times per zero crossing.
+
+    Entry j holds the kernel at x = j / per_crossing - half_width. Linear
+    interpolation into a table this fine is accurate to well below the
+    kernel's own ~80 dB stopband.
+    """
+    key = (half_width, beta)
+    if key not in _SINC_TABLES:
+        from scipy.special import i0
+
+        grid = np.linspace(-half_width, half_width, 2 * half_width * per_crossing + 1)
+        u = grid / half_width
+        window = i0(beta * np.sqrt(np.clip(1.0 - u * u, 0.0, None))) / i0(beta)
+        _SINC_TABLES[key] = (per_crossing, np.sinc(grid) * window)
+    return _SINC_TABLES[key]
 
 
 def pitch_shift_varying(
@@ -532,11 +615,32 @@ def pitch_shift_varying(
     )
     stretched = _stretch_to_time_map(signal, src, hop_length)
 
+    # The varispeed read is a resampling step, so it needs a real anti-aliasing
+    # reconstruction filter: shifting up decimates, and a linear read folds the
+    # top of the spectrum back down while dulling what stays.
+    if np.ptp(ratio) < 1e-9 and len(stretched) > 1:
+        # Constant ratio: a polyphase resampler does the same job much faster.
+        # Output sample j lands on stretched sample j * ratio, as the map says.
+        out = _resample_constant(stretched, float(ratio[0]))
+        if len(out) < n:
+            out = np.pad(out, (0, n - len(out)), mode="edge")
+        return out[:n].astype(np.float32)
+
     idx = np.clip(read, 0.0, len(stretched) - 1.0)
-    lo = np.floor(idx).astype(np.int64)
-    hi = np.minimum(lo + 1, len(stretched) - 1)
-    frac = idx - lo
-    return (stretched[lo] * (1.0 - frac) + stretched[hi] * frac).astype(np.float32)
+    return read_bandlimited(stretched, idx, ratio)
+
+
+def _resample_constant(signal: np.ndarray, speed: float) -> np.ndarray:
+    """Play `signal` back `speed` times faster, band-limited."""
+    try:
+        import soxr
+
+        return soxr.resample(
+            signal.astype(np.float32), speed, 1.0, quality="VHQ"
+        ).astype(np.float32)
+    except ImportError:
+        positions = np.arange(int(len(signal) / speed), dtype=np.float64) * speed
+        return read_bandlimited(signal, positions, speed)
 
 
 def _phase_vocoder(
@@ -544,11 +648,14 @@ def _phase_vocoder(
     time_map: np.ndarray,
     hop_length: int,
     n_fft: int,
+    phase_lock: bool = True,
 ) -> np.ndarray:
-    """Phase vocoder over an arbitrary time map.
+    """Phase vocoder over an arbitrary time map, with identity phase locking.
 
     librosa.phase_vocoder only takes a constant rate; DTW produces a rate that
     changes frame by frame, so the frame stepping is driven by `time_map` here.
+    It also has no phase locking, which is what `phase_lock` adds; see
+    _lock_phases. Turning it off gives the plain textbook vocoder.
     """
     n_bins = D.shape[0]
     # Phase a bin is expected to advance over one hop if its frequency sits
@@ -565,12 +672,50 @@ def _phase_vocoder(
     for i, step in enumerate(time_map):
         k = int(step)
         frac = step - k
-        out[:, i] = ((1.0 - frac) * mag[:, k] + frac * mag[:, k + 1]) * np.exp(1j * phase)
+        frame_mag = (1.0 - frac) * mag[:, k] + frac * mag[:, k + 1]
+        if phase_lock:
+            reference = ang[:, k] if frac < 0.5 else ang[:, k + 1]
+            phase = _lock_phases(frame_mag, phase, reference)
+        out[:, i] = frame_mag * np.exp(1j * phase)
 
         # Deviation from the expected advance = the bin's true instantaneous
         # frequency; accumulate that so partials stay put under any stretch.
         delta = ang[:, k + 1] - ang[:, k] - expected
         delta -= 2.0 * np.pi * np.round(delta / (2.0 * np.pi))
         phase = phase + expected + delta
+        # Keep the accumulator small; float precision degrades as it grows.
+        phase = (phase + np.pi) % (2.0 * np.pi) - np.pi
 
     return out
+
+
+def _lock_phases(
+    magnitude: np.ndarray,
+    phase: np.ndarray,
+    reference: np.ndarray,
+) -> np.ndarray:
+    """Identity phase locking (Laroche & Dolson, 1999).
+
+    A sinusoid does not live in one bin: the analysis window spreads it over
+    several, and in the input those bins keep a fixed phase relationship to the
+    peak. A plain phase vocoder advances every bin independently, which lets
+    that relationship drift. The partial then decorrelates from itself across
+    its own bins, heard as the typical hollow, "phasey", reverberant smear.
+
+    Here only spectral peaks keep their independently advanced phase. Every
+    other bin is assigned to its nearest peak and takes the peak's synthesis
+    phase plus the phase offset it had to that peak in the analysis frame,
+    restoring the shape each partial had in the input.
+    """
+    n_bins = len(magnitude)
+    if n_bins < 3:
+        return phase
+    interior = (magnitude[1:-1] > magnitude[:-2]) & (magnitude[1:-1] >= magnitude[2:])
+    peaks = np.flatnonzero(interior) + 1
+    if peaks.size == 0:
+        return phase
+    # Region of influence: each bin belongs to the nearest peak, with the
+    # boundary halfway between neighbouring peaks.
+    bounds = (peaks[:-1] + peaks[1:]) // 2
+    owner = peaks[np.searchsorted(bounds, np.arange(n_bins), side="right")]
+    return phase[owner] + reference - reference[owner]
