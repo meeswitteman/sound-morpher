@@ -630,6 +630,169 @@ def pitch_shift_varying(
     return read_bandlimited(stretched, idx, ratio)
 
 
+def spectral_envelope(
+    log_mag: np.ndarray,
+    n_ceps: int,
+    iterations: int = 8,
+) -> np.ndarray:
+    """True-envelope estimate of log-magnitude spectra, one column per frame.
+
+    A plain cepstral lifter smooths the log spectrum, which for a harmonic
+    sound means averaging peaks with the valleys between them: the envelope
+    sags, and sags more the sparser the harmonics are. That bias differs
+    between a sound and its pitch-shifted copy, so it would leak into any
+    correction built from the two. The true envelope (Imai; Röbel & Rodet)
+    iterates instead: smooth, lift every bin to at least the smoothed value,
+    smooth again. The result rests on the harmonic peaks.
+
+    `n_ceps` is the lifter cutoff in cepstral samples. It must stay below the
+    pitch period in samples, or the envelope starts tracing the harmonics
+    themselves.
+
+    Eight iterations land within 0.1 dB of twenty-four on harmonic test
+    vowels, at a third of the cost: the first few do nearly all the lifting.
+    """
+    n_fft = 2 * (log_mag.shape[0] - 1)
+    # Flat for the first half of the cepstral range, then a half-cosine down
+    # to zero. A hard cutoff rings (Gibbs) around any cliff in the spectrum,
+    # such as the drop above a sound's top harmonic, and that ripple reached
+    # far enough into the band to cut a shifted tone's fundamental.
+    weights = np.ones(n_ceps)
+    start = n_ceps // 2
+    ramp = np.arange(n_ceps - start) / max(1, n_ceps - start)
+    weights[start:] = 0.5 * (1.0 + np.cos(np.pi * ramp))
+    lifter = np.zeros(n_fft)
+    lifter[:n_ceps] = weights
+    lifter[n_fft - n_ceps + 1 :] = weights[1:][::-1]
+
+    def smooth(x: np.ndarray) -> np.ndarray:
+        cep = np.fft.irfft(x, n=n_fft, axis=0)
+        return np.fft.rfft(cep * lifter[:, np.newaxis], axis=0).real
+
+    target = log_mag.copy()
+    env = smooth(target)
+    for _ in range(iterations):
+        target = np.maximum(target, env)
+        env = smooth(target)
+    return env
+
+
+def _formant_stft(sample_rate: int) -> tuple[int, dict]:
+    n_fft = 2048 if sample_rate <= 50000 else 4096
+    hop = n_fft // 4
+    return hop, dict(fs=sample_rate, nperseg=n_fft, noverlap=n_fft - hop, window="hann")
+
+
+def formant_envelope(
+    original: np.ndarray,
+    sample_rate: int,
+    f0_high: float,
+) -> np.ndarray | None:
+    """Log spectral envelope of a mono signal, one column per STFT frame.
+
+    Computed once per source; apply_formant_correction() then derives every
+    shifted version's correction from it. Returns None when the signal is too
+    short to analyse or there is no pitch to set the lifter by.
+
+    `f0_high` is the highest fundamental in `original` itself; a shift does
+    not matter here, since the shifted envelope is derived from this one. It
+    sets the lifter cutoff, which has to sit below the shortest pitch period
+    so the envelope does not trace individual harmonics.
+    """
+    from scipy.signal import stft
+
+    _, kwargs = _formant_stft(sample_rate)
+    n_fft = kwargs["nperseg"]
+    if len(original) < n_fft or f0_high <= 0.0:
+        return None
+
+    from scipy.ndimage import maximum_filter1d
+
+    _, _, O = stft(original.astype(np.float64), **kwargs)
+    mag = np.abs(O)
+    # Floor 100 dB under each frame's peak: synthetic or gated input has true
+    # zeros between harmonics, and log(0) would dominate the cepstrum.
+    floor = np.maximum(mag.max(axis=0, keepdims=True) * 1e-5, 1e-12)
+    log_mag = np.log(np.maximum(mag, floor))
+    # Peak-hold across one harmonic spacing first. Clean harmonic input has
+    # valleys tens of dB deep between the partials, far deeper than the true
+    # envelope can lift in a few iterations; it then sags between harmonics
+    # and the correction ends up cutting whatever lands in a sag, the
+    # fundamental of a shifted tone included. After the hold every bin sees
+    # a neighbouring peak, so the envelope rests on the harmonics as intended.
+    spacing = f0_high * n_fft / sample_rate
+    log_mag = maximum_filter1d(log_mag, size=int(np.ceil(spacing)) + 1, axis=0, mode="nearest")
+    # Lifter at 70 % of the shortest pitch period, clamped to a range where the
+    # envelope keeps formant detail without chasing harmonics.
+    n_ceps = int(np.clip(0.7 * sample_rate / f0_high, 12, n_fft // 8))
+    return spectral_envelope(log_mag, n_ceps)
+
+
+def apply_formant_correction(
+    shifted: np.ndarray,
+    envelope: np.ndarray | None,
+    ratio: float | np.ndarray,
+    sample_rate: int,
+    max_correction_db: float = 30.0,
+) -> np.ndarray:
+    """Give a pitch-shifted mono signal back its source's spectral envelope.
+
+    Resampling-based pitch shifting moves the formants along with the pitch:
+    a voice shifted up a fifth gets a head half its size (the "chipmunk"
+    effect), and an instrument's body resonances slide with every note.
+
+    The shift scales every frequency by `ratio`, envelope included: what sat
+    at f in the source sits at f * ratio in the shifted signal. So the shifted
+    envelope at f is the source envelope at f / ratio, and each frame is
+    multiplied by E(f) / E(f / ratio). The harmonics stay where the shift put
+    them, and the resonances go back where they were. Reading the shifted
+    envelope off the source's instead of re-estimating it costs one
+    interpolation per step rather than a second envelope analysis, and it
+    carries none of the estimation bias a sparser harmonic comb would add.
+
+    `ratio` is a constant, or one value per sample of `shifted` for a pitch
+    contour; timing is unchanged by the shift, so frames line up. The
+    correction is capped at `max_correction_db` either way.
+    """
+    ratio_arr = np.asarray(ratio, dtype=np.float64)
+    n = len(shifted)
+    if envelope is None or n == 0 or np.allclose(ratio_arr, 1.0):
+        return shifted.astype(np.float32)
+
+    from scipy.signal import istft, stft
+
+    hop, kwargs = _formant_stft(sample_rate)
+    _, _, S = stft(shifted.astype(np.float64), **kwargs)
+    frames = min(S.shape[1], envelope.shape[1])
+    S = S[:, :frames]
+    env = envelope[:, :frames]
+    n_bins = env.shape[0]
+
+    # Ratio at each frame centre (scipy pads by half a frame, so frame j is
+    # centred on sample j * hop).
+    if ratio_arr.ndim == 0:
+        frame_ratio = np.full(frames, float(ratio_arr))
+    else:
+        centres = np.minimum(np.arange(frames) * hop, len(ratio_arr) - 1)
+        frame_ratio = ratio_arr[centres]
+
+    # Source envelope read at bin k / ratio, linearly between bins.
+    pos = np.clip(np.arange(n_bins)[:, np.newaxis] / frame_ratio[np.newaxis, :], 0, n_bins - 1)
+    lo = np.minimum(pos.astype(np.int64), n_bins - 2)
+    frac = pos - lo
+    cols = np.arange(frames)[np.newaxis, :]
+    warped = env[lo, cols] * (1.0 - frac) + env[lo + 1, cols] * frac
+
+    limit = max_correction_db / 20.0 * np.log(10.0)
+    gain = np.exp(np.clip(env - warped, -limit, limit))
+
+    _, out = istft(S * gain, **kwargs)
+    out = out[:n]
+    if len(out) < n:
+        out = np.pad(out, (0, n - len(out)))
+    return out.astype(np.float32)
+
+
 def _resample_constant(signal: np.ndarray, speed: float) -> np.ndarray:
     """Play `signal` back `speed` times faster, band-limited."""
     try:

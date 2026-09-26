@@ -72,6 +72,18 @@ inharmonic or noisy material and the contour then warbles. On the bundled bell
 samples, for instance, tracking spreads over a 2.6× range with several octave
 jumps, which `median` sidesteps entirely.
 
+### Formants
+
+Pitch Shift takes a **Formants** setting. `preserve` (default) keeps each
+sound's own resonances while its pitch moves, so a voice stays the same size
+and an instrument keeps its body instead of turning into a "chipmunk". It
+estimates each source's spectral envelope once (a true-envelope cepstral
+estimate), and after every shift multiplies the spectrum by the ratio of the
+source envelope to the same envelope stretched by the shift. On synthetic
+vowels that brings the harmonic levels from 13-23 dB off the source's formant
+curve to 3-10 dB. It roughly doubles the plugin's run time. `shift` lets the
+resonances move with the pitch, as before.
+
 ### Resampling and phase locking
 
 Every path that changes pitch or timing (Pitch Shift in both modes, Granular's

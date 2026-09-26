@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from plugins.base import MorphPlugin, PluginParam, match_lengths, pitch_shift_varying
+from plugins.base import (
+    MorphPlugin,
+    PluginParam,
+    match_lengths,
+    apply_formant_correction,
+    formant_envelope,
+    pitch_shift_varying,
+)
 
 _HOP = 512
 
@@ -49,6 +56,20 @@ class PitchShiftPlugin(MorphPlugin):
                 "warbles on unpitched material where detection is unreliable."
             ),
         ),
+        PluginParam(
+            name="formants",
+            label="Formants",
+            type="choice",
+            default="preserve",
+            choices=["preserve", "shift"],
+            tooltip=(
+                "preserve: each sound keeps its own resonances while its pitch "
+                "moves, so a voice stays the same size and an instrument keeps "
+                "its body.  "
+                "shift: resonances move with the pitch, the classic "
+                "resampling 'chipmunk' sound. Faster."
+            ),
+        ),
     ]
 
     def morph(
@@ -61,6 +82,7 @@ class PitchShiftPlugin(MorphPlugin):
         fmin: float = 60.0,
         fmax: float = 4000.0,
         tracking: str = "median",
+        formants: str = "preserve",
         **_: object,
     ) -> list[np.ndarray]:
         a, b = match_lengths(audio_a, audio_b)
@@ -70,10 +92,25 @@ class PitchShiftPlugin(MorphPlugin):
             track_a = _f0_track(_mono(a), sample_rate, fmin, fmax)
             track_b = _f0_track(_mono(b), sample_rate, fmin, fmax)
             usable = track_a is not None and track_b is not None
+            if usable:
+                # 95th percentile: a single octave glitch in the track should
+                # not drag the lifter cutoff down for the whole file.
+                top_a = float(np.percentile(track_a, 95))
+                top_b = float(np.percentile(track_b, 95))
         else:
             f0_a = _detect_f0(a, sample_rate, fmin, fmax)
             f0_b = _detect_f0(b, sample_rate, fmin, fmax)
             usable = f0_a > 0.0 and f0_b > 0.0
+            top_a, top_b = f0_a, f0_b
+
+        # Each shifted sound gets its own source envelope back. The envelopes
+        # do not depend on the step, so they are analysed once here, each with
+        # a lifter set by that source's own pitch: the shifted envelope is
+        # derived from it, never estimated from the shifted signal.
+        env_a = env_b = None
+        if usable and formants == "preserve":
+            env_a = _envelopes(a, sample_rate, top_a)
+            env_b = _envelopes(b, sample_rate, top_b)
 
         result: list[np.ndarray] = []
         for i in range(steps):
@@ -89,11 +126,16 @@ class PitchShiftPlugin(MorphPlugin):
                 result.append(_crossfade(a, b, t))
             elif tracking == "dynamic":
                 result.append(
-                    _dynamic_step(a, b, track_a, track_b, t, channels, len(a))
+                    _dynamic_step(
+                        a, b, track_a, track_b, t, channels, len(a),
+                        sample_rate, env_a, env_b,
+                    )
                 )
             else:
                 result.append(
-                    _median_step(a, b, f0_a, f0_b, t, sample_rate, channels)
+                    _median_step(
+                        a, b, f0_a, f0_b, t, sample_rate, channels, env_a, env_b
+                    )
                 )
 
             if progress_cb:
@@ -112,6 +154,8 @@ def _median_step(
     t: float,
     sr: int,
     channels: int,
+    env_a: list | None = None,
+    env_b: list | None = None,
 ) -> np.ndarray:
     # Target pitch interpolates in the log domain, where a fixed distance is a
     # fixed musical interval. Linear interpolation of Hz drifts flat.
@@ -119,6 +163,8 @@ def _median_step(
     interval = np.log2(f0_b / f0_a)
     shifted_a = _shift_channels(a, sr, 12.0 * interval * t, channels)
     shifted_b = _shift_channels(b, sr, -12.0 * interval * (1.0 - t), channels)
+    shifted_a = _restore_formants(shifted_a, env_a, 2.0 ** (interval * t), sr)
+    shifted_b = _restore_formants(shifted_b, env_b, 2.0 ** (-interval * (1.0 - t)), sr)
     return _crossfade(shifted_a, shifted_b, t)
 
 
@@ -130,6 +176,9 @@ def _dynamic_step(
     t: float,
     channels: int,
     n_samples: int,
+    sr: int = 44100,
+    env_a: list | None = None,
+    env_b: list | None = None,
 ) -> np.ndarray:
     interval = np.log(track_b) - np.log(track_a)      # per frame, log domain
     ratio_a = _to_samples(np.exp(interval * t), n_samples)
@@ -144,7 +193,44 @@ def _dynamic_step(
 
     shifted_a = np.stack(cols_a, axis=1)
     shifted_b = np.stack(cols_b, axis=1)
+    shifted_a = _restore_formants(shifted_a, env_a, ratio_a, sr)
+    shifted_b = _restore_formants(shifted_b, env_b, ratio_b, sr)
     return _crossfade(shifted_a, shifted_b, t)
+
+
+def _envelopes(audio: np.ndarray, sr: int, f0_high: float) -> list:
+    """Source spectral envelope per channel, for _restore_formants()."""
+    audio = audio.reshape(len(audio), -1)
+    return [formant_envelope(audio[:, ch], sr, f0_high) for ch in range(audio.shape[1])]
+
+
+def _restore_formants(
+    shifted: np.ndarray,
+    envelopes: list | None,
+    ratio: float | np.ndarray,
+    sr: int,
+) -> np.ndarray:
+    """Per channel, give `shifted` its source's spectral envelope back.
+
+    `envelopes` None means formants are allowed to move with the pitch.
+    """
+    if envelopes is None:
+        return shifted
+    cols = [
+        apply_formant_correction(shifted[:, ch], envelopes[ch], ratio, sr)
+        for ch in range(shifted.shape[1])
+    ]
+    corrected = np.stack(cols, axis=1)
+    # The correction redistributes energy across the spectrum and should not
+    # change loudness, but its average gain is not exactly 0 dB (about -2 dB
+    # shifting up a fifth, +1.5 dB shifting down). Left in, that tilts the
+    # A/B balance of the crossfade. One gain for all channels restores the
+    # level without touching the stereo image.
+    before = float(np.sqrt(np.mean(shifted.astype(np.float64) ** 2)))
+    after = float(np.sqrt(np.mean(corrected.astype(np.float64) ** 2)))
+    if before > 1e-9 and after > 1e-9:
+        corrected = corrected * (before / after)
+    return corrected.astype(np.float32)
 
 
 def _crossfade(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
