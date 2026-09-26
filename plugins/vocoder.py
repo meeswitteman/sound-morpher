@@ -8,6 +8,7 @@ import scipy.signal as ss
 from plugins.base import (
     MorphPlugin,
     PluginParam,
+    limit_peaks,
     lpc_to_lsf,
     lsf_to_lpc,
     match_lengths,
@@ -97,7 +98,13 @@ class VocoderPlugin(MorphPlugin):
                 _synthesise(analyses[ch], a[:, ch], b[:, ch], t, frame_len, hop)
                 for ch in range(n_ch)
             ]
-            result.append(np.stack(cols, axis=1).astype(np.float32))
+            # Look-ahead limiter on the stacked channels rather than a hard clip
+            # per channel: clipping generated broadband distortion on every
+            # overshoot, before the engine's own limiter ever saw the peak.
+            # One gain across all channels keeps the stereo image put, and the
+            # limiter is a no-op when nothing is over.
+            stacked = np.stack(cols, axis=1).astype(np.float32)
+            result.append(limit_peaks(stacked, sample_rate, ceiling=1.0))
             if progress_cb:
                 progress_cb(i + 1)
 
@@ -264,4 +271,4 @@ def _synthesise(
     # one frame contributes and the window is close to zero.
     output /= np.maximum(norm, 0.3)
 
-    return np.clip(output, -1.0, 1.0).astype(np.float32)
+    return output.astype(np.float32)

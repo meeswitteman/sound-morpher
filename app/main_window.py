@@ -6,7 +6,7 @@ from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSize, QSettings
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 
 from app.audio_engine import AudioEngine
 from app.bpm_engine import BpmEngine
-from app.export import ExportEngine
+from app.export import EXPORT_BIT_DEPTHS, ExportEngine
 from app.morph_engine import MorphEngine
 from app.project_file import ProjectFile, ProjectFileError, SMORPH_FILTER
 from app.project_state import ProjectState
@@ -36,6 +36,8 @@ from app.widgets.plugin_param_panel import PluginParamPanel
 from app.widgets.sound_slot import SoundSlot
 from app.widgets.step_grid import StepGrid
 from plugins.registry import build_default_registry
+
+_BIT_DEPTH_LABELS = {16: "16-bit", 24: "24-bit", 32: "32-bit float"}
 
 
 class MainWindow(QMainWindow):
@@ -60,6 +62,8 @@ class MainWindow(QMainWindow):
         self._build_central()
         self._build_bottom_toolbar()
         self._build_statusbar()
+        self.project.bit_depth = self._default_bit_depth()
+        self._sync_bit_depth_ui()
         self._connect_shortcuts()
         self._connect_morph_engine()
         self._connect_bpm_engine()
@@ -88,6 +92,18 @@ class MainWindow(QMainWindow):
         project_menu = mb.addMenu("Project")
         project_menu.addAction("Project Settings…")
         project_menu.addSeparator()
+        depth_menu = project_menu.addMenu("Export Bit Depth")
+        self._bit_depth_group = QActionGroup(self)
+        self._bit_depth_group.setExclusive(True)
+        self._bit_depth_actions: dict[int, QAction] = {}
+        for depth in EXPORT_BIT_DEPTHS:
+            act = depth_menu.addAction(_BIT_DEPTH_LABELS[depth])
+            act.setCheckable(True)
+            act.setData(depth)
+            self._bit_depth_group.addAction(act)
+            self._bit_depth_actions[depth] = act
+        self._bit_depth_group.triggered.connect(self._on_bit_depth_chosen)
+
         self._act_dither = project_menu.addAction("Dither 16-bit Exports")
         self._act_dither.setCheckable(True)
         self._act_dither.setChecked(
@@ -754,7 +770,8 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return
         self._on_stop()
-        self.project = ProjectState()
+        self.project = ProjectState(bit_depth=self._default_bit_depth())
+        self._sync_bit_depth_ui()
         self.slot_a.clear()
         self.slot_b.clear()
         if self._step_grid is not None:
@@ -816,6 +833,9 @@ class MainWindow(QMainWindow):
 
     def _load_project_into_ui(self, state: ProjectState) -> None:
         self.project = state
+        if state.bit_depth not in EXPORT_BIT_DEPTHS:
+            state.bit_depth = 16
+        self._sync_bit_depth_ui()
 
         # Audio slots
         if state.audio_a is not None:
@@ -858,6 +878,35 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Loaded — {Path(state.file_path).name if state.file_path else 'project'}"
         )
+
+    # ── Export bit depth ───────────────────────────────────────────────
+
+    def _default_bit_depth(self) -> int:
+        """Bit depth for new projects: the last one the user picked."""
+        depth = self._settings.value("export/bit_depth", 16, type=int)
+        return depth if depth in EXPORT_BIT_DEPTHS else 16
+
+    def _on_bit_depth_chosen(self, action: QAction) -> None:
+        depth = int(action.data())
+        if depth == self.project.bit_depth:
+            return
+        self.project.bit_depth = depth
+        self._settings.setValue("export/bit_depth", depth)
+        self._sync_bit_depth_ui()
+        # The bit depth is saved with the project, so it counts as a change,
+        # but only once there is a project worth saving.
+        if self.project.ready_to_morph:
+            self._set_unsaved(True)
+
+    def _sync_bit_depth_ui(self) -> None:
+        depth = self.project.bit_depth
+        act = self._bit_depth_actions.get(depth)
+        if act is not None:
+            act.setChecked(True)
+        # Dither only ever applies to 16-bit exports.
+        self._act_dither.setEnabled(depth == 16)
+        label = _BIT_DEPTH_LABELS.get(depth, f"{depth}-bit")
+        self.lbl_status_sr.setText(f"{self.project.sample_rate} Hz · {label}")
 
     # ── Unsaved-changes helpers ────────────────────────────────────────
 

@@ -8,6 +8,23 @@ import soundfile as sf
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 
+EXPORT_BIT_DEPTHS: tuple[int, ...] = (16, 24, 32)
+
+
+def subtype_for_bit_depth(bit_depth: int) -> str:
+    """Map an export bit depth to a libsndfile WAV subtype.
+
+    32 means IEEE float rather than 32-bit integer: float keeps the full
+    resolution of the internal float32 pipeline and is what DAWs and samplers
+    expect when "32-bit" is offered.
+    """
+    if bit_depth <= 16:
+        return "PCM_16"
+    if bit_depth <= 24:
+        return "PCM_24"
+    return "FLOAT"
+
+
 class _Signals(QObject):
     progress = Signal(int)    # 0–100
     finished = Signal(str)    # output directory path
@@ -59,9 +76,10 @@ class _ExportWorker(QRunnable):
 
     def run(self) -> None:
         total = len(self._steps)
-        subtype = "PCM_16" if self._bit_depth <= 16 else "PCM_24"
-        # 24-bit quantisation already sits far below anything audible, so dither
-        # there would only add noise for no benefit.
+        subtype = subtype_for_bit_depth(self._bit_depth)
+        # 24-bit quantisation already sits far below anything audible, and float
+        # does not quantise to a fixed step at all, so dither there would only
+        # add noise for no benefit.
         dithering = self._dither and self._bit_depth <= 16
         rng = np.random.default_rng()
         try:

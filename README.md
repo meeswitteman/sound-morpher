@@ -84,12 +84,21 @@ apart into a chorus. `mono` downmixes first and is roughly twice as fast.
 ## Export
 
 Steps are written as `morph_step_01.wav` … `morph_step_NN.wav` at the project's
-sample rate and bit depth. 16-bit exports get TPDF dither, which turns the
+sample rate and bit depth. Choose 16-bit, 24-bit or 32-bit float under
+**Project → Export Bit Depth**; new projects start from the last choice. Use
+24-bit or float when the steps go into a DAW or sampler for further work.
+
+16-bit exports get TPDF dither, which turns the
 quantiser's signal-dependent distortion into an ordinary noise floor — most
 audible on the fades and tails a morph sequence is full of. Toggle it under
 **Project → Dither 16-bit Exports**; turn it off when the steps feed further
-processing, so dither is applied only once at the very end. 24-bit exports are
-never dithered, as the quantisation already sits below anything audible.
+processing, so dither is applied only once at the very end. 24-bit and float
+exports are never dithered, as the quantisation already sits below anything
+audible.
+
+The export bit depth only applies to the exported files. Audio inside a
+`.smorph` project is always stored as 32-bit float, so saving and reopening a
+project never costs quality.
 
 ---
 
