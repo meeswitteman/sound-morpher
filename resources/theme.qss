@@ -88,6 +88,15 @@ QPushButton[accent="true"]:pressed {
     background-color: #009898;
     border-color: #009898;
 }
+/* Play All while the sequence runs: lit up rather than relabelled. */
+QPushButton[accent="true"][playing="true"] {
+    background-color: #8ff4f4;
+    border-color: #ffffff;
+}
+QPushButton[accent="true"][playing="true"]:hover {
+    background-color: #b0f8f8;
+    border-color: #ffffff;
+}
 QPushButton[accent="true"]:disabled {
     background-color: #1a3a3a;
     color: #3a5a5a;

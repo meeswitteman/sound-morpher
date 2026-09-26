@@ -230,7 +230,7 @@ python main.py
 2. **Set steps** — choose how many morph steps (2–32) using the steps spinner.
 3. **Choose algorithm** — select a morphing algorithm from the dropdown and adjust its parameters.
 4. **Compute** — click **Recompute** to generate all steps. Spectrogram thumbnails appear immediately.
-5. **Preview** — click any step tile to hear it, or use the transport buttons to play the full sequence.
+5. **Preview** — click any step tile to hear it, or click **Play All** (Ctrl+Space) to play the full sequence. Each step rings out under the next, and Play All lights up while the sequence runs; clicking it again restarts from the first step. **Stop** (Escape) silences everything, including tails still ringing after the sequence ends.
 6. **BPM sync** — set the BPM and beats-per-step to lock playback to your project tempo. Use **Tap** to measure tempo from a beat.
 7. **Export** — click **Export WAVs** to save all steps as `morph_step_01.wav` … `morph_step_NN.wav`.
 8. **Save session** — use **File → Save** to write a `.smorph` project file that embeds both source WAVs and all settings.
