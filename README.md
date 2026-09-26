@@ -10,7 +10,7 @@ A desktop application for morphing between two audio samples in configurable dis
 
 - **7 morphing algorithms** — from simple crossfade to WORLD vocoder and Griffin-Lim
 - **Spectrogram thumbnails** per morph step, computed on the fly
-- **BPM-synchronized playback** with tap tempo and loop toggle
+- **BPM-synchronized playback** with tap tempo and loop toggle; each step starts on the beat and the previous one rings out underneath it instead of being cut off
 - **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing, time-stretched through a phase vocoder so the alignment does not move either sound's pitch
 - **Original endpoints** — the first step is always the untouched sound A and the last always the untouched sound B, heard in full
 - **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints, with a look-ahead limiter catching any remaining peaks

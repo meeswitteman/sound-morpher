@@ -624,7 +624,10 @@ class MainWindow(QMainWindow):
     def _on_step_advance(self, idx: int) -> None:
         steps = self.project.morph_steps
         if 0 <= idx < len(steps):
-            self.audio_engine.play(steps[idx], self.project.sample_rate)
+            # Each step starts on the beat and the previous one rings out
+            # underneath it, instead of being cut off at the step boundary.
+            # Stop still silences everything at once.
+            self.audio_engine.play_overlapping(steps[idx], self.project.sample_rate)
         if self._step_grid is not None:
             self._step_grid.set_active(idx)
 
@@ -1002,6 +1005,7 @@ class MainWindow(QMainWindow):
             return
         self._on_stop()
         self.bpm_engine.wait(500)
+        self.audio_engine.close()
         event.accept()
 
     def _on_about(self) -> None:

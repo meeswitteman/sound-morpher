@@ -93,8 +93,10 @@ class BpmEngine(QThread):
                     elif self._loop_mode == "loop":
                         step = 0 if direction > 0 else n - 1
                     else:
-                        # Ensure the final step lights up before stopping
-                        self.step_advance.emit(max(0, min(step - direction, n - 1)))
+                        # The final step was announced when it started. Emitting
+                        # it again here, as this used to, started its audio a
+                        # second time; with tails ringing out, the last step
+                        # would then sound twice on top of itself.
                         self.playback_stopped.emit()
                         return
 
