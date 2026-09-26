@@ -14,6 +14,34 @@ from plugins.base import (
 )
 
 
+def with_original_endpoints(
+    steps: list[np.ndarray],
+    audio_a: np.ndarray,
+    audio_b: np.ndarray,
+) -> list[np.ndarray]:
+    """Replace the first and last step with the untouched sources.
+
+    The first step of a morph is sound A and the last is sound B, exactly as
+    the user loaded and edited them, and they must be heard in full. Nothing
+    downstream of the source slots may change them: not a plugin that
+    resynthesises its endpoints (the LPC and WORLD vocoders did, and LPC lost
+    B's tail entirely when A was shorter), not the zero-padding that equalises
+    lengths, not Stretch to Fit or DTW Align, and not level matching or the
+    limiter. Enforcing it here, after all of those, makes it hold for every
+    plugin, including ones not written yet.
+
+    The endpoints therefore keep their own length. Every consumer (tiles,
+    playback, export, project files) handles steps of different lengths.
+    """
+    if not steps:
+        return steps
+    out = list(steps)
+    out[0] = np.array(audio_a, dtype=np.float32, copy=True)
+    if len(out) > 1:
+        out[-1] = np.array(audio_b, dtype=np.float32, copy=True)
+    return out
+
+
 class _Signals(QObject):
     progress = Signal(int)        # 0–100
     finished = Signal(list)       # list[np.ndarray]
@@ -78,15 +106,21 @@ class _Worker(QRunnable):
                     f"expected {steps}"
                 )
             if self._level_match:
+                # No shared trim: the endpoints are fixed at their original
+                # level (below), so trimming only the steps in between would
+                # put a dip of up to 3 dB into the loudness line next to them.
+                # Overshoot in those steps goes to the limiter instead.
                 result = match_step_loudness(
-                    result, a, b, sample_rate=self._sample_rate
+                    result, a, b, max_trim_db=0.0, sample_rate=self._sample_rate
                 )
             else:
                 # Without level matching nothing else guards the ceiling, and a
                 # float export would carry overs straight into the file. The
                 # limiter returns steps that are already under it untouched.
                 result = [limit_peaks(s, self._sample_rate) for s in result]
-            self.signals.finished.emit(result)
+            self.signals.finished.emit(
+                with_original_endpoints(result, self._audio_a, self._audio_b)
+            )
         except Exception as exc:
             self.signals.error.emit(str(exc))
 

@@ -12,6 +12,7 @@ A desktop application for morphing between two audio samples in configurable dis
 - **Spectrogram thumbnails** per morph step, computed on the fly
 - **BPM-synchronized playback** with tap tempo and loop toggle
 - **DTW Align** — optional Dynamic Time Warping preprocessing to align A and B before morphing, time-stretched through a phase vocoder so the alignment does not move either sound's pitch
+- **Original endpoints** — the first step is always the untouched sound A and the last always the untouched sound B, heard in full
 - **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints, with a look-ahead limiter catching any remaining peaks
 - **Stretch to Fit** — time-stretch the shorter source to match the longer one instead of padding it with silence
 - **Live recording** — record directly into a source slot (mic or line-in)
@@ -62,14 +63,22 @@ Spectral FFT between sources whose spectra hardly overlap (a dark pad into a
 bright hiss, say) can lose more than that mid-sequence, and those steps then
 stay somewhat quiet rather than having their noise floor pulled up.
 
-After each step is scaled onto the loudness curve, peaks are handled in two
-stages. A single shared gain comes first, up to 3 dB, because one gain across the
-whole set is transparent and keeps the relative levels intact. Beyond that a
-shared trim would be the wrong tool — one overshooting transient, which spectral
-reconstruction readily produces, would drag the entire sequence down with it. So
-anything still over the ceiling goes to a look-ahead limiter, which only acts
-where and when it has to. On a source pushed 10 dB into the limiter, that is
-worth about 8 dB of output level over a shared trim.
+After each step is scaled onto the loudness curve, anything over the ceiling
+goes to a look-ahead limiter, which only acts where and when it has to. There is
+no shared trim across the sequence: the endpoints stay at their original level
+(see below), so trimming only the steps in between would put a dip into the
+loudness line right next to them. A shared trim would also be the wrong tool for
+the typical case, where one overshooting transient from spectral reconstruction
+would drag the entire sequence down with it.
+
+### Original endpoints
+
+The first step is always sound A and the last always sound B, exactly as they
+sit in the source slots: same samples, same length, heard in full. The engine
+enforces this after everything else has run, so no plugin, no zero-padding, no
+Stretch to Fit or DTW Align, and no level matching or limiting can change them.
+When A and B differ in length, the endpoints keep their own length and the steps
+in between take the longer one.
 
 ### Pitch tracking
 
