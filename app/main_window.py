@@ -5,7 +5,7 @@ from collections import deque
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QSettings
+from PySide6.QtCore import QCoreApplication, Qt, QSize, QSettings
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -594,16 +594,24 @@ class MainWindow(QMainWindow):
         self.spin_beats.valueChanged.connect(self._on_beats_changed)
 
     def _on_play_all(self) -> None:
+        """Start the sequence, or restart it from the first step if it is running.
+
+        Play All no longer turns into a second Stop button while playing: the
+        toolbar has one Stop (Escape), which also silences tails still ringing
+        after the sequence ends and single-step previews. Play All lights up
+        while the sequence runs instead.
+        """
         if not self.project.has_morph_steps:
             return
-        if self._playing:
+        if self._playing or self.bpm_engine.isRunning():
+            # Restart. The old sequencer thread emits playback_stopped on its
+            # way out; let it finish and deliver that now, or it would arrive
+            # after the new run has started and reset the UI mid-sequence.
             self._on_stop()
-            return
+            self.bpm_engine.wait(500)
+            QCoreApplication.sendPostedEvents()
         self._playing = True
-        self.btn_play_all.setText("■  Stop")
-        self.btn_play_all.setProperty("accent", "false")
-        self.btn_play_all.style().unpolish(self.btn_play_all)
-        self.btn_play_all.style().polish(self.btn_play_all)
+        self._set_play_all_lit(True)
         self._rebuild_beat_dots(self.spin_beats.value())
         loop_map = {0: "off", 1: "loop", 2: "pingpong"}
         self.bpm_engine.configure(
@@ -622,9 +630,17 @@ class MainWindow(QMainWindow):
         self._reset_playback_ui()
 
     def _on_step_advance(self, idx: int) -> None:
+        if not self._playing:
+            # A step the sequencer thread announced just before it was
+            # stopped, delivered after the stop. Starting it now would sound
+            # a step after Stop, or an old step at the start of a restart.
+            return
         steps = self.project.morph_steps
         if 0 <= idx < len(steps):
-            self.audio_engine.play(steps[idx], self.project.sample_rate)
+            # Each step starts on the beat and the previous one rings out
+            # underneath it, instead of being cut off at the step boundary.
+            # Stop still silences everything at once.
+            self.audio_engine.play_overlapping(steps[idx], self.project.sample_rate)
         if self._step_grid is not None:
             self._step_grid.set_active(idx)
 
@@ -645,11 +661,19 @@ class MainWindow(QMainWindow):
         if self._step_grid is not None:
             self._step_grid.clear_active()
 
-    def _reset_playback_ui(self) -> None:
-        self.btn_play_all.setText("▶  Play All")
-        self.btn_play_all.setProperty("accent", "true")
+    def _set_play_all_lit(self, lit: bool) -> None:
+        self.btn_play_all.setProperty("playing", "true" if lit else "false")
+        self.btn_play_all.setToolTip(
+            "Sequence playing — click to restart from the first step (Ctrl+Space). "
+            "Stop with ■ Stop or Escape."
+            if lit
+            else "Play all morph steps in sequence (Ctrl+Space)"
+        )
         self.btn_play_all.style().unpolish(self.btn_play_all)
         self.btn_play_all.style().polish(self.btn_play_all)
+
+    def _reset_playback_ui(self) -> None:
+        self._set_play_all_lit(False)
         for dot in self._beat_dots:
             dot.setStyleSheet("color: #252525; font-size: 11px;")
 
@@ -1002,6 +1026,7 @@ class MainWindow(QMainWindow):
             return
         self._on_stop()
         self.bpm_engine.wait(500)
+        self.audio_engine.close()
         event.accept()
 
     def _on_about(self) -> None:

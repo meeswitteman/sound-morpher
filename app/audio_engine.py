@@ -60,11 +60,75 @@ def _resample(audio: np.ndarray, src_sr: int, target_sr: int) -> np.ndarray:
     ).astype(np.float32)
 
 
+_OUT_CHANNELS = 2
+
+
+class VoiceMixer:
+    """Sums any number of sounds ("voices") into one output, block by block.
+
+    Kept free of any audio device so it can be tested directly; the stream
+    callback in AudioEngine only asks it for the next block. Each voice plays
+    to its own end and then drops out.
+    """
+
+    def __init__(self, channels: int = _OUT_CHANNELS) -> None:
+        self._channels = channels
+        self._voices: list[list] = []      # [audio (n, channels), position]
+        self._lock = threading.Lock()
+
+    def add(self, audio: np.ndarray) -> None:
+        arr = np.asarray(audio, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        if arr.shape[1] == 1 and self._channels > 1:
+            arr = np.repeat(arr, self._channels, axis=1)
+        elif arr.shape[1] > self._channels:
+            arr = arr[:, : self._channels]
+        if arr.shape[0] == 0:
+            return
+        with self._lock:
+            self._voices.append([np.ascontiguousarray(arr), 0])
+
+    def clear(self) -> None:
+        with self._lock:
+            self._voices.clear()
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return bool(self._voices)
+
+    @property
+    def voice_count(self) -> int:
+        with self._lock:
+            return len(self._voices)
+
+    def render(self, frames: int) -> np.ndarray:
+        out = np.zeros((frames, self._channels), dtype=np.float32)
+        with self._lock:
+            still_playing = []
+            for voice in self._voices:
+                audio, pos = voice
+                chunk = audio[pos : pos + frames]
+                out[: len(chunk)] += chunk
+                voice[1] = pos + len(chunk)
+                if voice[1] < len(audio):
+                    still_playing.append(voice)
+            self._voices = still_playing
+        # A tail under the next attack can add up past full scale; clip
+        # rather than let the D/A wrap or distort harder.
+        np.clip(out, -1.0, 1.0, out=out)
+        return out
+
+
 class AudioEngine:
     """Load and play WAV audio. Thread-safe playback control."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._mixer = VoiceMixer(_OUT_CHANNELS)
+        self._stream = None
+        self._stream_sr = 0
         # Gain applied by the last load_wav() to bring it under full scale, in
         # dB (0.0 or negative).
         self.last_load_trim_db = 0.0
@@ -124,17 +188,70 @@ class AudioEngine:
 
     def play(self, audio: np.ndarray, sample_rate: int) -> None:
         """Play audio non-blocking. Stops any current playback first."""
-        self.stop()
-        sd.play(audio, samplerate=sample_rate)
+        self._ensure_stream(sample_rate)
+        self._mixer.clear()
+        self._mixer.add(audio)
+
+    def play_overlapping(self, audio: np.ndarray, sample_rate: int) -> None:
+        """Start audio on top of whatever is playing, letting that ring out.
+
+        Play All uses this: each step starts on the beat while the previous
+        one's tail keeps sounding underneath it, as on a sampler, instead of
+        being cut off at the step boundary.
+        """
+        self._ensure_stream(sample_rate)
+        self._mixer.add(audio)
 
     def stop(self) -> None:
-        sd.stop()
+        """Silence everything immediately."""
+        self._mixer.clear()
 
     def is_playing(self) -> bool:
-        try:
-            return bool(sd.get_stream().active)
-        except RuntimeError:
-            return False
+        return self._mixer.active
+
+    def close(self) -> None:
+        """Release the audio device."""
+        self._mixer.clear()
+        with self._lock:
+            stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+
+    def _ensure_stream(self, sample_rate: int) -> None:
+        """Open the shared output stream, or reopen it at a new sample rate.
+
+        One stream stays open for the whole session and every sound is mixed
+        into it. sd.play() opened a new stream per call and could only play
+        one sound at a time, which is what cut each Play All step's tail off.
+        """
+        with self._lock:
+            if self._stream is not None and self._stream_sr == sample_rate:
+                return
+            old, self._stream = self._stream, None
+        if old is not None:
+            try:
+                old.stop()
+                old.close()
+            except Exception:
+                pass
+        self._mixer.clear()
+        stream = sd.OutputStream(
+            samplerate=sample_rate,
+            channels=_OUT_CHANNELS,
+            dtype="float32",
+            callback=self._callback,
+        )
+        stream.start()
+        with self._lock:
+            self._stream = stream
+            self._stream_sr = sample_rate
+
+    def _callback(self, outdata, frames, _time, _status) -> None:
+        outdata[:] = self._mixer.render(frames)
 
     def list_input_devices(self) -> list[dict]:
         """Return available input devices as list of {index, name} dicts."""
