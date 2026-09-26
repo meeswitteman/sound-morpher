@@ -5,6 +5,7 @@ from scipy.signal import stft, istft
 
 from plugins.base import (
     MorphPlugin,
+    both_present,
     PluginParam,
     interp_magnitude,
     interp_phase,
@@ -165,7 +166,18 @@ def _spectral_mix(
 
         mag = interp_magnitude(np.abs(Za), np.abs(Zb), t, mode=magnitude)
         ang = interp_phase(np.angle(Za), np.angle(Zb), t, mode=phase)
-        Z_mix = mag * np.exp(1j * ang)
+        Z_morph = mag * np.exp(1j * ang)
+
+        # Where one source is silent or has died away, a morph would take the
+        # other one down with it (and the phase blend would bend it towards a
+        # silent side's meaningless phase). Those frames get a plain
+        # crossfade of the two spectra instead, which keeps what is sounding
+        # at its crossfade weight and with its own phase.
+        present = both_present(
+            np.sum(np.abs(Za) ** 2, axis=0), np.sum(np.abs(Zb) ** 2, axis=0)
+        )
+        Z_fade = (1.0 - t) * Za + t * Zb
+        Z_mix = present * Z_morph + (1.0 - present) * Z_fade
 
         _, ch_out = istft(Z_mix, fs=sample_rate, nperseg=n_fft, noverlap=n_fft - hop)
         # Match length to input

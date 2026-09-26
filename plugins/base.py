@@ -77,6 +77,33 @@ def interp_magnitude(
     return np.exp((1.0 - t) * log_a + t * log_b)
 
 
+def both_present(
+    energy_a: np.ndarray,
+    energy_b: np.ndarray,
+    absent_db: float = -60.0,
+    present_db: float = -40.0,
+) -> np.ndarray:
+    """Per frame, how far both sources are actually sounding, from 0 to 1.
+
+    1 where each is within `present_db` of the other, 0 where one sits
+    `absent_db` or more below the other (or is silent), a straight ramp in
+    between. Two silent frames count as present: morphing silence into
+    silence is silence either way.
+
+    A morph of a sound with nothing is not meaningful. The geometric
+    magnitude blend in particular multiplies by the silent side, so wherever
+    one source has ended (a shorter sound zero-padded to the longer one's
+    length, or a tail that has decayed away) it wiped out the other source
+    too: up to 41 dB lost in the steps nearest the shorter sound. Frames
+    weighted towards 0 here fall back to a plain crossfade instead.
+    """
+    ea = np.asarray(energy_a, dtype=np.float64)
+    eb = np.asarray(energy_b, dtype=np.float64)
+    tiny = 1e-30
+    ratio_db = 10.0 * np.log10((np.minimum(ea, eb) + tiny) / (np.maximum(ea, eb) + tiny))
+    return np.clip((ratio_db - absent_db) / (present_db - absent_db), 0.0, 1.0)
+
+
 def interp_phase(
     phase_a: np.ndarray,
     phase_b: np.ndarray,

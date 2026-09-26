@@ -5,6 +5,7 @@ import librosa
 
 from plugins.base import (
     MorphPlugin,
+    both_present,
     PluginParam,
     interp_magnitude,
     interp_phase,
@@ -165,10 +166,23 @@ def _griffin_lim_mix(
         n_frames = min(Za.shape[1], Zb.shape[1])
         Za, Zb = Za[:, :n_frames], Zb[:, :n_frames]
 
-        mag_mix = interp_magnitude(np.abs(Za), np.abs(Zb), t, mode=magnitude)
+        # See spectral_fft: frames where one source is silent or has died away
+        # take a plain crossfade instead of a morph, which would otherwise
+        # take the sounding source down with the silent one.
+        present = both_present(
+            np.sum(np.abs(Za) ** 2, axis=0), np.sum(np.abs(Zb) ** 2, axis=0)
+        )
+        Z_fade = (1.0 - t) * Za + t * Zb
+        mag_morph = interp_magnitude(np.abs(Za), np.abs(Zb), t, mode=magnitude)
+        mag_mix = present * mag_morph + (1.0 - present) * np.abs(Z_fade)
 
         if seed_phase:
             init = interp_phase(np.angle(Za), np.angle(Zb), t)
+            # In crossfaded frames seed from the crossfade's own phase, not
+            # from a blend towards a silent side's meaningless phase.
+            init = np.angle(
+                present * np.exp(1j * init) + (1.0 - present) * np.exp(1j * np.angle(Z_fade))
+            )
             ch_out = _griffinlim_seeded(mag_mix, init, n_iter, n_fft, hop, target_len)
         else:
             ch_out = librosa.griffinlim(
