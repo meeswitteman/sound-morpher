@@ -217,12 +217,26 @@ def match_step_loudness(
     max_trim_db: float = 3.0,
     sample_rate: int = 44100,
 ) -> list[np.ndarray]:
-    """Scale each step so its RMS tracks a straight line from A's RMS to B's.
+    """Scale each step so its loudness tracks a straight line from A's to B's.
 
     Blending two uncorrelated signals costs ~3 dB in the middle of the sequence,
     and geometric-mean spectral interpolation costs more still, so intermediate
     steps arrive audibly thinner than the endpoints. This restores the intended
     loudness curve.
+
+    Loudness is ITU-R BS.1770 integrated loudness (LUFS), not plain RMS. RMS
+    weighs every frequency alike, so a step with more low end than its
+    neighbours read as louder than it sounds and was turned down, and one with
+    more presence-range energy was turned up: the sequence rose and dipped in
+    perceived level wherever the spectrum shifted, which is exactly what a morph
+    does. The K-weighting follows the ear instead, and the gating ignores the
+    silent stretches that would otherwise make a sparse step read quiet.
+
+    The target runs in a straight line in LUFS, so each step is the same
+    perceived step louder or quieter. Where one end is silent a line in dB
+    cannot reach it, so the target then runs linearly in amplitude instead,
+    which still fades cleanly to nothing. Steps with nothing measurable, and
+    content the ear does not weigh at all such as DC, are left alone.
 
     Peaks are then handled in two stages. First a single shared gain, up to
     `max_trim_db`, because one gain across the whole set is transparent and keeps
@@ -235,21 +249,25 @@ def match_step_loudness(
     if not steps:
         return steps
 
-    rms_a = _rms(audio_a)
-    rms_b = _rms(audio_b)
-    max_gain = 10.0 ** (max_gain_db / 20.0)
+    lufs_a = integrated_loudness(audio_a, sample_rate)
+    lufs_b = integrated_loudness(audio_b, sample_rate)
+    both_audible = np.isfinite(lufs_a) and np.isfinite(lufs_b)
     n = len(steps)
 
     scaled: list[np.ndarray] = []
     for i, step in enumerate(steps):
         t = i / (n - 1) if n > 1 else 0.0
-        target = (1.0 - t) * rms_a + t * rms_b
-        current = _rms(step)
-        if current < 1e-9 or target < 1e-9:
+        if both_audible:
+            target = (1.0 - t) * lufs_a + t * lufs_b
+        else:
+            amp = (1.0 - t) * _db_to_amp(lufs_a) + t * _db_to_amp(lufs_b)
+            target = 20.0 * np.log10(amp) if amp > 0.0 else -np.inf
+        current = integrated_loudness(step, sample_rate)
+        if not (np.isfinite(current) and np.isfinite(target)):
             scaled.append(step)
             continue
-        gain = np.clip(target / current, 1.0 / max_gain, max_gain)
-        scaled.append((step * gain).astype(np.float32))
+        gain_db = float(np.clip(target - current, -max_gain_db, max_gain_db))
+        scaled.append((step * 10.0 ** (gain_db / 20.0)).astype(np.float32))
 
     peak = max((float(np.max(np.abs(s))) for s in scaled), default=0.0)
     if peak > ceiling:
@@ -339,10 +357,82 @@ def limit_peaks(
     return (out.ravel() if flat else out).astype(np.float32)
 
 
-def _rms(audio: np.ndarray) -> float:
-    if audio.size == 0:
-        return 0.0
-    return float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+def _db_to_amp(db: float) -> float:
+    return 10.0 ** (db / 20.0) if np.isfinite(db) else 0.0
+
+
+def k_weighting(sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
+    """BS.1770 K-weighting as one 4th-order filter (b, a) at any sample rate.
+
+    The standard publishes the two stages as biquad coefficients for 48 kHz
+    only. These are the analogue prototypes fitted to them (a +4 dB high shelf
+    around 1.7 kHz for the head's acoustic effect, and a high-pass around
+    38 Hz, the "revised low-frequency B" curve; B. De Man's derivation), taken
+    back through the bilinear transform. That reproduces the published 48 kHz
+    coefficients to ~1e-8 and holds at any rate.
+    """
+    # Stage 1: high shelf.
+    gain_db, q, fc = 3.999843853973347, 0.7071752369554196, 1681.974450955533
+    k = np.tan(np.pi * fc / sample_rate)
+    vh = 10.0 ** (gain_db / 20.0)
+    vb = vh ** 0.4996667741545416
+    a0 = 1.0 + k / q + k * k
+    b1 = np.array([vh + vb * k / q + k * k, 2.0 * (k * k - vh), vh - vb * k / q + k * k]) / a0
+    a1 = np.array([1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0])
+    # Stage 2: high pass. The standard's numerator is exactly [1, -2, 1].
+    q, fc = 0.5003270373238773, 38.13547087602444
+    k = np.tan(np.pi * fc / sample_rate)
+    a0 = 1.0 + k / q + k * k
+    b2 = np.array([1.0, -2.0, 1.0])
+    a2 = np.array([1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0])
+
+    return np.convolve(b1, b2), np.convolve(a1, a2)
+
+
+def integrated_loudness(audio: np.ndarray, sample_rate: int) -> float:
+    """ITU-R BS.1770-4 integrated loudness in LUFS; -inf when nothing is audible.
+
+    K-weighted mean square over 400 ms blocks with 75 % overlap, then two
+    gates: blocks under -70 LUFS are dropped outright, then blocks more than
+    10 LU under the loudness of what is left. Channels are summed with unit
+    weight, as the standard does for left and right.
+
+    Morph steps are often shorter than one block. Those are measured as a
+    single block over their whole length, which is what the gated measure
+    converges to for a short, steady sound.
+    """
+    from scipy.signal import lfilter
+
+    arr = np.asarray(audio, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    n = arr.shape[0]
+    if n == 0:
+        return -np.inf
+
+    b, a = k_weighting(sample_rate)
+    weighted = lfilter(b, a, arr, axis=0)
+    power = np.sum(weighted ** 2, axis=1)   # summed over channels, per sample
+
+    block = int(round(0.4 * sample_rate))
+    step = int(round(0.1 * sample_rate))
+    if n <= block:
+        z = np.array([power.mean()])
+    else:
+        # Mean square of every block via a cumulative sum, O(n).
+        csum = np.concatenate([[0.0], np.cumsum(power)])
+        starts = np.arange(0, n - block + 1, step)
+        z = (csum[starts + block] - csum[starts]) / block
+
+    with np.errstate(divide="ignore"):
+        block_lufs = -0.691 + 10.0 * np.log10(z)
+    kept = z[block_lufs > -70.0]
+    if kept.size == 0:
+        return -np.inf
+    relative_gate = -0.691 + 10.0 * np.log10(kept.mean()) - 10.0
+    with np.errstate(divide="ignore"):
+        kept = kept[-0.691 + 10.0 * np.log10(kept) > relative_gate]
+    return float(-0.691 + 10.0 * np.log10(kept.mean()))
 
 
 # ── Utility shared across plugins ─────────────────────────────────────────────

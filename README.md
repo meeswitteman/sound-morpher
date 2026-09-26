@@ -52,6 +52,16 @@ Match** on when using `log`.
 
 ### Level Match and peaks
 
+Loudness is measured as ITU-R BS.1770 integrated loudness (LUFS): K-weighted,
+so a step with more low end is not mistaken for a louder one, and gated, so
+silent stretches inside a step do not make it read quiet. The target runs in a
+straight line in LUFS from A to B, which makes every step the same perceived
+step; if one end is silent it runs linearly in amplitude instead, so the fade
+still reaches nothing. Each step's gain is capped at 12 dB either way.
+Spectral FFT between sources whose spectra hardly overlap (a dark pad into a
+bright hiss, say) can lose more than that mid-sequence, and those steps then
+stay somewhat quiet rather than having their noise floor pulled up.
+
 After each step is scaled onto the loudness curve, peaks are handled in two
 stages. A single shared gain comes first, up to 3 dB, because one gain across the
 whole set is transparent and keeps the relative levels intact. Beyond that a

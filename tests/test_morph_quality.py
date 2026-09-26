@@ -1041,13 +1041,16 @@ def test_level_match_follows_a_straight_line_from_a_to_b():
 
     from plugins.crossfade import CrossfadePlugin
     steps = CrossfadePlugin().morph(a, b, steps=5, sample_rate=SR, curve="linear")
-    matched = match_step_loudness(steps, a, b)
+    matched = match_step_loudness(steps, a, b, sample_rate=SR)
 
-    rms_a, rms_b = _rms(a), _rms(b)
+    # A straight line in LUFS: equal perceived steps from A's loudness to B's.
+    from plugins.base import integrated_loudness
+
+    lufs_a, lufs_b = integrated_loudness(a, SR), integrated_loudness(b, SR)
     for i, step in enumerate(matched):
         t = i / (len(matched) - 1)
-        expected = (1 - t) * rms_a + t * rms_b
-        assert _rms(step) == pytest.approx(expected, rel=0.02)
+        expected = (1 - t) * lufs_a + t * lufs_b
+        assert integrated_loudness(step, SR) == pytest.approx(expected, abs=0.05)
 
 
 def test_level_match_applies_one_shared_gain_when_clipping():
@@ -1073,8 +1076,9 @@ def test_level_match_ignores_silent_steps():
 
 
 def test_level_match_respects_max_gain():
-    a = np.full((100, 1), 0.5, dtype=np.float32)
-    b = np.full((100, 1), 0.5, dtype=np.float32)
-    tiny = [np.full((100, 1), 1e-4, dtype=np.float32) for _ in range(3)]
-    matched = match_step_loudness(tiny, a, b, max_gain_db=6.0)
-    assert _rms(matched[0]) == pytest.approx(1e-4 * 10 ** (6 / 20), rel=1e-3)
+    # A 1 kHz tone rather than DC: loudness is K-weighted, and DC is inaudible.
+    a = _tone(1000.0, 0.2, amp=0.5)
+    b = _tone(1000.0, 0.2, amp=0.5)
+    tiny = [_tone(1000.0, 0.2, amp=1e-3) for _ in range(3)]
+    matched = match_step_loudness(tiny, a, b, max_gain_db=6.0, sample_rate=SR)
+    assert _rms(matched[0]) == pytest.approx(_rms(tiny[0]) * 10 ** (6 / 20), rel=1e-3)
