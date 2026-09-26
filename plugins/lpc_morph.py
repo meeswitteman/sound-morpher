@@ -6,6 +6,7 @@ from scipy.signal import lfilter
 from plugins.base import (
     MorphPlugin,
     PluginParam,
+    both_present,
     lpc_to_lsf,
     lsf_to_lpc,
     match_lengths,
@@ -151,19 +152,32 @@ def _morph_mono(
         # this plugin didn't.
         fa = sig_a[pos : pos + frame_len].astype(np.float64) * window
         fb = sig_b[pos : pos + frame_len].astype(np.float64) * window
+        fade = (1.0 - t) * fa + t * fb
 
-        try:
-            lpc_a = librosa.lpc(fa, order=order).astype(np.float64)
-            lpc_b = librosa.lpc(fb, order=order).astype(np.float64)
+        # Where one source is silent or has died away there is nothing to
+        # morph: its envelope fit is meaningless, and with the default
+        # excitation from A, a silent A silenced the whole frame. That lost
+        # B's entire tail whenever A was the shorter sound. Such frames fall
+        # back to a plain crossfade, with a ramp between -40 and -60 dB.
+        present = float(both_present(np.sum(fa ** 2), np.sum(fb ** 2)))
+        if present <= 0.0:
+            synth = fade
+        else:
+            try:
+                lpc_a = librosa.lpc(fa, order=order).astype(np.float64)
+                lpc_b = librosa.lpc(fb, order=order).astype(np.float64)
 
-            lsf_t = (1.0 - t) * lpc_to_lsf(lpc_a) + t * lpc_to_lsf(lpc_b)
-            lpc_t = lsf_to_lpc(lsf_t)
+                lsf_t = (1.0 - t) * lpc_to_lsf(lpc_a) + t * lpc_to_lsf(lpc_b)
+                lpc_t = lsf_to_lpc(lsf_t)
 
-            exc  = _get_excitation(fa, fb, lpc_a, lpc_b, t, excitation)
-            synth = lfilter([1.0], lpc_t, exc)
-        except Exception:
-            # Silent frame or numerical failure → linear blend
-            synth = (1.0 - t) * fa + t * fb
+                exc  = _get_excitation(fa, fb, lpc_a, lpc_b, t, excitation)
+                synth = lfilter([1.0], lpc_t, exc)
+                if not np.all(np.isfinite(synth)):
+                    raise FloatingPointError("unstable synthesis")
+            except Exception:
+                # Numerical failure → linear blend
+                synth = fade
+            synth = present * synth + (1.0 - present) * fade
 
         # Frame is now windowed twice (once for analysis, once for the OLA
         # below), so the overlap-add normalises by the window's square — same

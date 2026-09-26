@@ -80,6 +80,16 @@ Stretch to Fit or DTW Align, and no level matching or limiting can change them.
 When A and B differ in length, the endpoints keep their own length and the steps
 in between take the longer one.
 
+### Unequal lengths and tails
+
+Without Stretch to Fit, the shorter sound is padded with silence, and a tail
+can also simply decay away faster in one sound than in the other. A morph of a
+sound with nothing is not meaningful: the geometric blend of Spectral FFT and
+Griffin-Lim multiplied the sounding source away, and LPC / Source-Filter went
+silent. Wherever one source sits 40 to 60 dB or more below the other, those
+plugins now fall back, frame by frame, to a crossfade, so the steps in between
+keep the longer sound's tail. Where both sources sound, the morph is unchanged.
+
 ### Pitch tracking
 
 Pitch Shift takes a **Tracking** setting. `median` (default) finds one
