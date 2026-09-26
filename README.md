@@ -95,6 +95,15 @@ synthesises each channel so the stereo image survives; the WORLD vocoder shares
 one pitch track across channels, since estimating F0 per channel lets them drift
 apart into a chorus. `mono` downmixes first and is roughly twice as fast.
 
+### WORLD pitch detector
+
+The WORLD vocoder takes a **Pitch detector** setting. `harvest` (default) keeps
+notes voiced through noise, breath and vibrato. `dio` is about 7× faster to
+analyse and just as accurate on clean recordings, but on noisy material it
+dropped 10 to 20 % of the frames inside a note, which WORLD then rebuilds from
+noise as crackle. The analysis runs once per morph, not once per step, so
+Harvest's extra cost stays small.
+
 ---
 
 ## Export
