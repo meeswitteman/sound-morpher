@@ -210,6 +210,12 @@ class SoundSlot(QGroupBox):
             notices.append(
                 f"Sound {self._label}: 32-bit float WAV converted to project format"
             )
+        trim = self._engine.last_load_trim_db
+        if trim < 0.0:
+            notices.append(
+                f"Sound {self._label}: peaked {-trim:.1f} dB over full scale, "
+                f"scaled down {-trim:.1f} dB instead of clipping"
+            )
         if notices:
             self.status_message.emit("  |  ".join(notices))
 

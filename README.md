@@ -142,6 +142,20 @@ Harvest's extra cost stays small.
 
 ---
 
+## Loading sources
+
+Every loaded sound is conditioned before it reaches a plugin:
+
+- **Hot float WAVs are scaled, not clipped.** A 32-bit float file can peak
+  above full scale. The whole file is scaled down to a peak of 1.0, which keeps
+  the waveform intact, and the status bar says by how many dB.
+- **DC offset is removed** with a zero-phase high-pass at 5 Hz. It has no gain
+  at DC, costs 0.5 dB at 20 Hz and 0.2 dB at 30 Hz, and leaves the phase of
+  kicks and bass untouched.
+- **Sample-rate conversion** uses soxr at its highest quality setting.
+
+---
+
 ## Export
 
 Steps are written as `morph_step_01.wav` … `morph_step_NN.wav` at the project's

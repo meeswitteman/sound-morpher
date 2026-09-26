@@ -28,8 +28,8 @@ def test_get_wav_info(tmp_path):
     assert "PCM_16" in info["subtype"]
 
 
-def test_float_wav_loads_and_clips(tmp_path):
-    """Float32 WAVs with out-of-range values are clipped to [-1, 1]."""
+def test_float_wav_over_full_scale_is_scaled_not_clipped(tmp_path):
+    """Float32 WAVs peaking over 1.0 are scaled into [-1, 1], shape intact."""
     from app.audio_engine import AudioEngine
 
     wav = tmp_path / "float.wav"
@@ -42,6 +42,9 @@ def test_float_wav_loads_and_clips(tmp_path):
 
     assert audio.max() <= 1.0
     assert audio.min() >= -1.0
+    # One gain for the whole file: every ratio between samples survives.
+    np.testing.assert_allclose(audio, data / 1.8, rtol=1e-6)
+    assert engine.last_load_trim_db == pytest.approx(-20 * np.log10(1.8))
 
 
 def test_float_wav_subtype_detected(tmp_path):
