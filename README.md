@@ -94,6 +94,20 @@ vowels that brings the harmonic levels from 13-23 dB off the source's formant
 curve to 3-10 dB. It roughly doubles the plugin's run time. `shift` lets the
 resonances move with the pitch, as before.
 
+### Transients
+
+Spectral FFT and Griffin-Lim take a **Transients** setting. One FFT size cannot
+suit both halves of a sound: long frames resolve partials but smear every
+attack into pre-echo, short frames keep attacks sharp but blur the partials.
+`preserve` (default) splits each source once into a tonal and a transient
+layer (harmonic/percussive separation; the transient layer is the exact
+remainder, so the two always sum back to the source). The tonal layer morphs at
+the chosen FFT size, the transient layer at about 6 ms. On isolated drum hits
+that cuts the pre-echo before each hit by 12-26 dB, and attacks rise in under
+2 ms instead of 5-11 ms. Steady material comes out practically unchanged.
+Spectral FFT takes about 3 s longer on 8 steps of 5 s stereo, Griffin-Lim about
+7 s. `smear` morphs everything at one size, as before.
+
 ### Resampling and phase locking
 
 Every path that changes pitch or timing (Pitch Shift in both modes, Granular's

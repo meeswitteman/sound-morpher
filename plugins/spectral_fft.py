@@ -9,6 +9,22 @@ from plugins.base import (
     interp_magnitude,
     interp_phase,
     match_lengths,
+    split_transients,
+    transient_fft_size,
+)
+
+TRANSIENTS_PARAM = PluginParam(
+    name="transients",
+    label="Transients",
+    type="choice",
+    default="preserve",
+    choices=["preserve", "smear"],
+    tooltip=(
+        "preserve: split each sound into a tonal and a transient layer; the "
+        "tonal layer morphs at the chosen FFT size, the attacks at a short "
+        "one, so hits stay sharp instead of smearing into pre-echo.  "
+        "smear: everything at the chosen FFT size, as before. Faster."
+    ),
 )
 
 _FFT_CHOICES = ["256", "512", "1024", "2048", "4096"]
@@ -67,6 +83,7 @@ class SpectralFftPlugin(MorphPlugin):
                 "comparison."
             ),
         ),
+        TRANSIENTS_PARAM,
     ]
 
     def morph(
@@ -80,6 +97,7 @@ class SpectralFftPlugin(MorphPlugin):
         overlap: int = 75,
         magnitude: str = "log",
         phase: str = "shortest-arc",
+        transients: str = "preserve",
         **_: object,
     ) -> list[np.ndarray]:
         n_fft = int(fft_size)
@@ -87,6 +105,15 @@ class SpectralFftPlugin(MorphPlugin):
         a, b = match_lengths(audio_a, audio_b)
         channels = a.shape[1] if a.ndim == 2 else 1
         result: list[np.ndarray] = []
+
+        # The split does not depend on the step, so it runs once per source.
+        # At or below the short size there is nothing to gain from it.
+        short = transient_fft_size(sample_rate)
+        layered = transients == "preserve" and n_fft > short
+        if layered:
+            tonal_a, trans_a = split_transients(a, sample_rate)
+            tonal_b, trans_b = split_transients(b, sample_rate)
+            short_hop = max(1, int(short * (1 - overlap / 100)))
 
         for i in range(steps):
             t = i / (steps - 1) if steps > 1 else 0.0
@@ -96,6 +123,15 @@ class SpectralFftPlugin(MorphPlugin):
                 result.append(a.astype(np.float32))
             elif t >= 1.0:
                 result.append(b.astype(np.float32))
+            elif layered:
+                tonal = _spectral_mix(
+                    tonal_a, tonal_b, t, sample_rate, n_fft, hop, channels, magnitude, phase
+                )
+                hits = _spectral_mix(
+                    trans_a, trans_b, t, sample_rate, short, short_hop, channels,
+                    magnitude, phase,
+                )
+                result.append((tonal + hits).astype(np.float32))
             else:
                 result.append(
                     _spectral_mix(

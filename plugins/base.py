@@ -767,6 +767,56 @@ def spectral_envelope(
     return env
 
 
+def transient_fft_size(sample_rate: int) -> int:
+    """FFT size for the transient layer: ~6 ms, a power of two."""
+    return int(2 ** round(np.log2(256 * sample_rate / 44100)))
+
+
+def split_transients(
+    audio: np.ndarray,
+    sample_rate: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split audio into a tonal layer and a transient layer that sum back exactly.
+
+    A spectral morph has to pick one FFT size, and no size suits both halves of
+    a sound. Long frames resolve partials but smear every attack over the whole
+    frame, as pre-echo before the hit and a blur after it; short frames keep
+    attacks sharp but cannot separate partials. Splitting first lets each
+    layer be morphed at the size that suits it.
+
+    The split is harmonic/percussive separation (Fitzgerald's median filtering,
+    via librosa): energy that is steady over time goes to the tonal layer,
+    energy that is broadband and brief goes to the transient layer. Only the
+    tonal layer is reconstructed from the masked STFT; the transient layer is
+    the exact remainder, so the two always add up to the input sample for
+    sample and nothing is lost to the split itself.
+
+    Accepts (n,) or (n, channels) and returns the same layout, in float32.
+    Signals too short for one analysis frame come back entirely tonal.
+    """
+    import librosa
+
+    arr = np.asarray(audio, dtype=np.float32)
+    flat = arr.ndim == 1
+    if flat:
+        arr = arr.reshape(-1, 1)
+    n = arr.shape[0]
+    n_fft = 2048 if sample_rate <= 50000 else 4096
+    hop = n_fft // 4
+
+    tonal = arr.copy()
+    if n >= n_fft:
+        for ch in range(arr.shape[1]):
+            D = librosa.stft(arr[:, ch], n_fft=n_fft, hop_length=hop)
+            harmonic, _ = librosa.decompose.hpss(D)
+            tonal[:, ch] = librosa.istft(harmonic, hop_length=hop, n_fft=n_fft, length=n)
+    transient = arr - tonal
+
+    if flat:
+        return tonal.ravel(), transient.ravel()
+    return tonal, transient
+
+
 def _formant_stft(sample_rate: int) -> tuple[int, dict]:
     n_fft = 2048 if sample_rate <= 50000 else 4096
     hop = n_fft // 4
