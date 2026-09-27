@@ -24,6 +24,8 @@ class ProjectState:
     beats_per_step: int = 4
     loop_mode: str = "off"   # "off" | "loop" | "pingpong"
     reverse: bool = False
+    sweep: str = "uniform"   # "uniform" | "forward" | "backward" | "center_out"
+    sweep_edge: int = 25     # width of the sweep's morph front, % of the sound
 
     morph_steps: list[np.ndarray] = field(default_factory=list)
 

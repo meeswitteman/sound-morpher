@@ -42,6 +42,8 @@ class ProjectFile:
             "beats_per_step":   state.beats_per_step,
             "loop_mode":        state.loop_mode,
             "reverse":          state.reverse,
+            "sweep":            state.sweep,
+            "sweep_edge":       state.sweep_edge,
             "step_count":       len(state.morph_steps),
         }
 
@@ -98,6 +100,8 @@ class ProjectFile:
                     beats_per_step=int(meta.get("beats_per_step", 4)),
                     loop_mode=meta.get("loop_mode", "off") if "loop_mode" in meta else ("loop" if meta.get("loop") else "off"),
                     reverse=bool(meta.get("reverse", False)),
+                    sweep=str(meta.get("sweep", "uniform")),
+                    sweep_edge=int(meta.get("sweep_edge", 25)),
                     file_path=str(path),
                 )
 

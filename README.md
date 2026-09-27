@@ -15,6 +15,7 @@ A desktop application for morphing between two audio samples in configurable dis
 - **Original endpoints** — the first step is always the untouched sound A and the last always the untouched sound B, heard in full
 - **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints, with a look-ahead limiter catching any remaining peaks
 - **Stretch to Fit** — time-stretch the shorter source to match the longer one instead of padding it with silence
+- **Sweep** — instead of morphing the whole sound at once, let the morph travel through it step by step: Start → End, End → Start, or Center → Out. The Edge setting sets how wide the moving morph zone is
 - **Live recording** — record directly into a source slot (mic or line-in)
 - **Trim & volume** controls per source slot
 - **Project files** — save and reload full sessions as `.smorph`

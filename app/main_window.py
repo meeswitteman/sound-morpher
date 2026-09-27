@@ -38,6 +38,12 @@ from app.widgets.step_grid import StepGrid
 from plugins.registry import build_default_registry
 
 _BIT_DEPTH_LABELS = {16: "16-bit", 24: "24-bit", 32: "32-bit float"}
+_SWEEP_ITEMS = [
+    ("Uniform", "uniform"),
+    ("Start → End", "forward"),
+    ("End → Start", "backward"),
+    ("Center → Out", "center_out"),
+]
 
 
 class MainWindow(QMainWindow):
@@ -271,6 +277,38 @@ class MainWindow(QMainWindow):
             "left of the shorter sound."
         )
         row.addWidget(self.chk_stretch)
+
+        row.addWidget(_vline())
+
+        row.addWidget(QLabel("Sweep:"))
+        self.combo_sweep = QComboBox()
+        for label, key in _SWEEP_ITEMS:
+            self.combo_sweep.addItem(label, key)
+        self.combo_sweep.setToolTip(
+            "Uniform: every step morphs the whole sound at once.\n"
+            "Start → End: the morph begins at the start of the sound and moves "
+            "towards the end, step by step.\n"
+            "End → Start: the same, from the end back to the start.\n"
+            "Center → Out: the morph begins in the middle and spreads to both ends."
+        )
+        row.addWidget(self.combo_sweep)
+
+        self.spin_sweep_edge = QSpinBox()
+        self.spin_sweep_edge.setRange(1, 100)
+        self.spin_sweep_edge.setValue(25)
+        self.spin_sweep_edge.setSuffix(" %")
+        self.spin_sweep_edge.setPrefix("Edge ")
+        self.spin_sweep_edge.setToolTip(
+            "Width of the moving morph front, as a share of the sound. Small: a "
+            "sharp boundary between B and A. Large: a long gradual morph zone."
+        )
+        self.spin_sweep_edge.setEnabled(False)
+        row.addWidget(self.spin_sweep_edge)
+        self.combo_sweep.currentIndexChanged.connect(
+            lambda _i: self.spin_sweep_edge.setEnabled(
+                self.combo_sweep.currentData() != "uniform"
+            )
+        )
 
         row.addStretch()
         outer.addLayout(row)
@@ -522,6 +560,8 @@ class MainWindow(QMainWindow):
             dtw=self.chk_dtw.isChecked(),
             level_match=self.chk_level_match.isChecked(),
             stretch_to_fit=self.chk_stretch.isChecked(),
+            sweep=self.combo_sweep.currentData(),
+            sweep_edge=self.spin_sweep_edge.value() / 100.0,
         )
 
     def _on_morph_progress(self, value: int) -> None:
@@ -844,6 +884,8 @@ class MainWindow(QMainWindow):
         loop_map = {0: "off", 1: "loop", 2: "pingpong"}
         self.project.loop_mode = loop_map.get(self.combo_loop.currentIndex(), "off")
         self.project.reverse = self.chk_reverse.isChecked()
+        self.project.sweep = self.combo_sweep.currentData()
+        self.project.sweep_edge = self.spin_sweep_edge.value()
         try:
             ProjectFile.save(path, self.project)
         except ProjectFileError as exc:
@@ -878,6 +920,8 @@ class MainWindow(QMainWindow):
         loop_map = {"off": 0, "loop": 1, "pingpong": 2}
         self.combo_loop.setCurrentIndex(loop_map.get(state.loop_mode, 0))
         self.chk_reverse.setChecked(state.reverse)
+        self.combo_sweep.setCurrentIndex(max(0, self.combo_sweep.findData(state.sweep)))
+        self.spin_sweep_edge.setValue(state.sweep_edge)
 
         idx = self.combo_algorithm.findText(state.algorithm)
         if idx >= 0:
