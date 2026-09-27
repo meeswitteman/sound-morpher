@@ -42,6 +42,74 @@ def with_original_endpoints(
     return out
 
 
+SWEEP_DIRECTIONS = ("uniform", "forward", "backward", "center_out")
+
+# The narrowest edge a sweep may have. A sharper switch from one level to the
+# next is heard as a click.
+_MIN_SWEEP_EDGE_S = 0.010
+
+
+def sweep_steps(
+    levels: list[np.ndarray],
+    direction: str,
+    edge: float,
+    sample_rate: int,
+) -> list[np.ndarray]:
+    """Let each step morph only part of the sound, with the part growing per step.
+
+    `levels` is an ordinary morph: level i is the whole sound morphed by
+    i / (n - 1). A sweep rebuilds step k from those levels along the time axis,
+    so that the morph starts at one place in the sound and travels through it:
+
+    - "forward": the start of the sound turns into B first, the end last.
+    - "backward": the end first, the start last.
+    - "center_out": the middle first, spreading out to both ends.
+
+    Behind the front the step is B, ahead of it A, and across the front, which
+    spans `edge` (a fraction of the sound), the plugin's own intermediate levels
+    take over, so the front is a morph rather than a splice. The front has
+    fully left the sound at the first and last step, so those stay pure A and
+    pure B. Each sample is a convex blend of two levels, so a sweep never peaks
+    higher than the levels it is built from.
+
+    "uniform" (the plain morph) and sequences too short to sweep come back as
+    they are.
+    """
+    n = len(levels)
+    if direction == "uniform" or n < 3:
+        return levels
+    if direction not in SWEEP_DIRECTIONS:
+        raise ValueError(f"Unknown sweep direction '{direction}'")
+
+    length = max(len(s) for s in levels)
+    stack = np.zeros((n, length) + levels[0].shape[1:], dtype=np.float32)
+    for i, s in enumerate(levels):
+        stack[i, : len(s)] = s
+
+    u = (np.arange(length) + 0.5) / length
+    if direction == "backward":
+        u = 1.0 - u
+    elif direction == "center_out":
+        u = np.abs(2.0 * u - 1.0)
+    edge = max(float(edge), _MIN_SWEEP_EDGE_S * sample_rate / length, 1e-6)
+
+    idx = np.arange(length)
+    out: list[np.ndarray] = []
+    for k in range(n):
+        p = k / (n - 1)
+        # The front runs from just before the sound (p = 0) to just past it
+        # (p = 1); t is how far each sample has morphed.
+        t = np.clip((p * (1.0 + edge) - u) / edge, 0.0, 1.0)
+        pos = t * (n - 1)
+        lo = np.minimum(pos.astype(np.int64), n - 2)
+        frac = (pos - lo).astype(np.float32)
+        if stack.ndim == 3:
+            frac = frac[:, None]
+        y = stack[lo, idx] * (1.0 - frac) + stack[lo + 1, idx] * frac
+        out.append(y.astype(np.float32))
+    return out
+
+
 class _Signals(QObject):
     progress = Signal(int)        # 0–100
     finished = Signal(list)       # list[np.ndarray]
@@ -61,6 +129,8 @@ class _Worker(QRunnable):
         dtw: bool = False,
         level_match: bool = True,
         stretch_to_fit: bool = False,
+        sweep: str = "uniform",
+        sweep_edge: float = 0.25,
     ) -> None:
         super().__init__()
         self.signals = _Signals()
@@ -73,6 +143,8 @@ class _Worker(QRunnable):
         self._dtw = dtw
         self._level_match = level_match
         self._stretch_to_fit = stretch_to_fit
+        self._sweep = sweep
+        self._sweep_edge = sweep_edge
         self.setAutoDelete(True)
 
     def run(self) -> None:
@@ -118,6 +190,12 @@ class _Worker(QRunnable):
                 # float export would carry overs straight into the file. The
                 # limiter returns steps that are already under it untouched.
                 result = [limit_peaks(s, self._sample_rate) for s in result]
+            # After level matching, so each level sits on the loudness line and
+            # the A and B parts of a swept step keep their own level instead of
+            # sharing one gain.
+            result = sweep_steps(
+                result, self._sweep, self._sweep_edge, self._sample_rate
+            )
             self.signals.finished.emit(
                 with_original_endpoints(result, self._audio_a, self._audio_b)
             )
@@ -155,6 +233,8 @@ class MorphEngine(QObject):
         dtw: bool = False,
         level_match: bool = True,
         stretch_to_fit: bool = False,
+        sweep: str = "uniform",
+        sweep_edge: float = 0.25,
     ) -> None:
         """Start async morph computation. Emits finished() or error() when done."""
         if self._active:
@@ -174,6 +254,8 @@ class MorphEngine(QObject):
             dtw=dtw,
             level_match=level_match,
             stretch_to_fit=stretch_to_fit,
+            sweep=sweep,
+            sweep_edge=sweep_edge,
         )
         worker.signals.progress.connect(self.progress)
         worker.signals.finished.connect(lambda result, g=gen: self._on_finished(result, g))
