@@ -97,6 +97,22 @@ QPushButton[accent="true"][playing="true"]:hover {
     background-color: #b0f8f8;
     border-color: #ffffff;
 }
+/* Magic: picks the settings by itself. */
+QPushButton[magic="true"] {
+    border-color: #b070ff;
+    color: #d8b8ff;
+    font-weight: 600;
+}
+QPushButton[magic="true"]:hover {
+    background-color: #2a2238;
+    border-color: #c890ff;
+    color: #ffffff;
+}
+QPushButton[magic="true"]:disabled {
+    background-color: #1a1a1a;
+    color: #3a3a3a;
+    border-color: #222222;
+}
 QPushButton[accent="true"]:disabled {
     background-color: #1a3a3a;
     color: #3a5a5a;

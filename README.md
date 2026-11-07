@@ -16,6 +16,7 @@ A desktop application for morphing between two audio samples in configurable dis
 - **Level Match** — keeps loudness on a straight line from A to B, so intermediate steps do not sound thinner than the endpoints, with a look-ahead limiter catching any remaining peaks
 - **Stretch to Fit** — time-stretch the shorter source to match the longer one instead of padding it with silence
 - **Sweep** — instead of morphing the whole sound at once, let the morph travel through it step by step: Start → End, End → Start, or Center → Out. The Edge setting sets how wide the moving morph zone is
+- **Magic** — one click picks everything for a natural morph: it analyses both sounds, lines up their starts, chooses stretching, padding or DTW, tries the algorithms that suit the pair, and keeps the one that measures most natural
 - **Live recording** — record directly into a source slot (mic or line-in)
 - **Trim & volume** controls per source slot
 - **Project files** — save and reload full sessions as `.smorph`
@@ -162,6 +163,45 @@ Harvest's extra cost stays small.
 
 ---
 
+### Magic
+
+**✨ Magic** (Ctrl+M) chooses the settings by itself, in three stages:
+
+1. **Analysis.** For each sound: where it starts and where it has died away
+   (on a 10 ms envelope), whether it has a clear pitch (autocorrelation
+   periodicity, pitch from YIN), how many separate attacks it has, whether it
+   is a one-shot hit (a sharp attack that then decays 20 dB or more), and how
+   noisy it is. Each sound is then *pitched*, *percussive*, *noisy* or *tonal*.
+2. **Plan.** Lengths and timing first. The later-starting sound skips its extra
+   silence, so the steps in between do not carry two attacks a moment apart.
+   Two sounds with several attacks each are lined up with DTW. Otherwise
+   lengths within 8 % are left alone, two hits are padded (stretching a hit
+   smears its decay), sustained sounds up to 3x apart are stretched to fit,
+   and anything further apart is padded, since a heavier stretch is heard as
+   processing. Then a shortlist of three algorithms for the pair: Pitch
+   Shift, WORLD Vocoder and Spectral FFT for two pitched sounds; Spectral FFT,
+   Vocoder and Crossfade for hits; Spectral FFT, Granular and Griffin-Lim for
+   textures; Spectral FFT, Vocoder and Crossfade otherwise. Parameters are set
+   from the analysis, for instance Pitch Shift's pitch range and whether it
+   tracks a moving pitch.
+3. **Trial.** Every candidate renders a five-step probe over the first six
+   seconds, which is scored, and the winner is rendered in full at the chosen
+   step count. In a timbre space (the cepstral envelope of the long-term
+   log-mel spectrum, plus a coarse loudness envelope over time), a natural
+   morph walks a straight line from A to B in even strides. The score adds up
+   the *detour* (path length over the straight distance), *unevenness* of the
+   strides, extra spectral flatness over the endpoints (*noise*), and for
+   pitched pairs lost pitch clarity (*blur*) and the distance from one pitch
+   gliding from A's to B's (*pitch*). Crossfade carries a handicap: nothing in
+   it is processed, so it measures well, but it plays both sounds at once
+   instead of morphing one into the other.
+
+The chosen algorithm, parameters, Stretch to Fit and DTW Align are filled in,
+and the report (Show Details in the Magic dialog) lists what was measured and
+how every candidate scored. From there, tweak and Recompute as usual; note that
+Recompute starts both sounds where they are, without Magic's start alignment
+and trailing-silence cut.
+
 ## Loading sources
 
 Every loaded sound is conditioned before it reaches a plugin:
@@ -240,7 +280,7 @@ python main.py
 1. **Load sounds** — drag a WAV file onto slot A and slot B, or click the slot to browse. You can also record directly via the microphone button.
 2. **Set steps** — choose how many morph steps (2–32) using the steps spinner.
 3. **Choose algorithm** — select a morphing algorithm from the dropdown and adjust its parameters.
-4. **Compute** — click **Recompute** to generate all steps. Spectrogram thumbnails appear immediately.
+4. **Compute** — click **Recompute** to generate all steps. Spectrogram thumbnails appear immediately. Or click **✨ Magic** to let Sound Morpher choose the algorithm and length handling itself.
 5. **Preview** — click any step tile to hear it, or click **Play All** (Ctrl+Space) to play the full sequence. Each step rings out under the next, and Play All lights up while the sequence runs; clicking it again restarts from the first step. **Stop** (Escape) silences everything, including tails still ringing after the sequence ends.
 6. **BPM sync** — set the BPM and beats-per-step to lock playback to your project tempo. Use **Tap** to measure tempo from a beat.
 7. **Export** — click **Export WAVs** to save all steps as `morph_step_01.wav` … `morph_step_NN.wav`.

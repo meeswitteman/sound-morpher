@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self.plugin_registry = build_default_registry()
         self._tap_times: deque[float] = deque(maxlen=8)
         self._playing = False
+        self._magic_running = False
         self._unsaved_changes = False
         self._settings = QSettings("SoundMorpher", "SoundMorpher")
 
@@ -360,6 +361,17 @@ class MainWindow(QMainWindow):
         self.btn_recompute.setEnabled(False)
         self.btn_recompute.setToolTip("Recalculate all morph steps with current settings")
 
+        self.btn_magic = QPushButton("✨  Magic")
+        self.btn_magic.setProperty("magic", "true")
+        self.btn_magic.setEnabled(False)
+        self.btn_magic.setToolTip(
+            "Let Sound Morpher choose everything for a natural morph: it analyses "
+            "A and B, lines up their starts, picks stretching or DTW, tries the "
+            "algorithms that suit the pair, and keeps the one that morphs most "
+            "smoothly. The chosen settings are filled in, so you can tweak and "
+            "Recompute from there (Ctrl+M)."
+        )
+
         self.btn_export = QPushButton("↓  Export Steps")
         self.btn_export.setEnabled(False)
         self.btn_export.setToolTip("Export all morph steps as WAV files")
@@ -380,6 +392,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_stop)
         tb.addSeparator()
         tb.addWidget(self.btn_recompute)
+        tb.addWidget(self.btn_magic)
         tb.addSeparator()
         tb.addWidget(self.btn_export)
         tb.addSeparator()
@@ -402,6 +415,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Escape"), self, self._on_stop)
         QShortcut(QKeySequence("Ctrl+Space"), self, self._on_play_all)
         QShortcut(QKeySequence("F5"), self, self._on_recompute)
+        QShortcut(QKeySequence("Ctrl+M"), self, self._on_magic)
 
     # ── Audio slot callbacks ───────────────────────────────────────────
 
@@ -483,6 +497,7 @@ class MainWindow(QMainWindow):
     def _refresh_recompute_button(self) -> None:
         ready = self.project.ready_to_morph and not self.morph_engine.is_running
         self.btn_recompute.setEnabled(ready)
+        self.btn_magic.setEnabled(ready)
         if ready and not self.project.has_morph_steps:
             self.statusBar().showMessage(
                 "Both sounds loaded — click ⟳ Recompute to generate morph steps"
@@ -519,7 +534,9 @@ class MainWindow(QMainWindow):
         self.morph_engine.finished.connect(self._on_morph_finished)
         self.morph_engine.error.connect(self._on_morph_error)
         self.morph_engine.cancelled.connect(self._on_morph_cancelled)
+        self.morph_engine.magic_finished.connect(self._on_magic_finished)
         self.btn_recompute.clicked.connect(self._on_recompute)
+        self.btn_magic.clicked.connect(self._on_magic)
 
     def _on_recompute(self) -> None:
         if not self.project.ready_to_morph or self.morph_engine.is_running:
@@ -545,6 +562,7 @@ class MainWindow(QMainWindow):
                 f"Computing {steps} morph steps using {plugin_name}…"
             )
 
+        self.btn_magic.setEnabled(False)
         self.btn_recompute.setEnabled(True)
         self.btn_recompute.setText("✕  Cancel")
         self.btn_recompute.clicked.disconnect()
@@ -564,7 +582,67 @@ class MainWindow(QMainWindow):
             sweep_edge=self.spin_sweep_edge.value() / 100.0,
         )
 
+    def _on_magic(self) -> None:
+        if not self.project.ready_to_morph or self.morph_engine.is_running:
+            return
+        if self._playing:
+            self._on_stop()
+
+        self._magic_running = True
+        self.statusBar().showMessage("✨ Magic: analysing A and B…")
+        self.btn_recompute.setEnabled(False)
+        self.btn_magic.setText("✕  Cancel")
+        self.btn_magic.clicked.disconnect()
+        self.btn_magic.clicked.connect(self._on_cancel_compute)
+
+        self.morph_engine.compute_magic(
+            registry=self.plugin_registry,
+            audio_a=self.project.audio_a,
+            audio_b=self.project.audio_b,
+            steps=self.spin_steps.value(),
+            sample_rate=self.project.sample_rate,
+        )
+
+    def _on_magic_finished(self, result) -> None:
+        self._reset_recompute_button()
+        self._apply_magic_settings(result)
+        self._on_morph_finished(result.steps)
+        self.statusBar().showMessage(
+            f"✨ Magic — {len(result.steps)} steps with {result.plugin}"
+            + ("  · stretched to fit" if result.stretch_to_fit else "")
+            + ("  · DTW aligned" if result.dtw else "")
+        )
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Magic")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(f"Chose <b>{result.plugin}</b>. The settings are filled in.")
+        msg.setInformativeText(
+            "Recompute with these settings starts the sounds where they are; "
+            "Magic also lined up their starts and cut trailing silence."
+        )
+        msg.setDetailedText("\n".join(result.report))
+        msg.setModal(False)
+        msg.show()
+        self._magic_report = msg   # keep it alive while it is open
+
+    def _apply_magic_settings(self, result) -> None:
+        """Fill in what Magic chose, so the user can listen, tweak and Recompute."""
+        idx = self.combo_algorithm.findText(result.plugin)
+        if idx >= 0:
+            # Changing the algorithm reloads the plugin's defaults; the chosen
+            # values go on top.
+            self.combo_algorithm.setCurrentIndex(idx)
+            self._param_panel.set_params(result.params)
+        self.chk_stretch.setChecked(result.stretch_to_fit)
+        self.chk_dtw.setChecked(result.dtw)
+        self.chk_level_match.setChecked(True)
+        self.combo_sweep.setCurrentIndex(max(0, self.combo_sweep.findData("uniform")))
+
     def _on_morph_progress(self, value: int) -> None:
+        if self._magic_running:
+            self.statusBar().showMessage(f"✨ Magic: trying algorithms… {value}%")
+            return
         self.statusBar().showMessage(f"Computing… {value}%")
 
     def _on_morph_finished(self, steps: list) -> None:
@@ -602,6 +680,7 @@ class MainWindow(QMainWindow):
     def _on_cancel_compute(self) -> None:
         self.morph_engine.cancel()
         self._reset_recompute_button()
+        self._refresh_recompute_button()
         self.statusBar().showMessage("Computation cancelled — worker will finish in background")
 
     def _on_morph_cancelled(self) -> None:
@@ -614,6 +693,13 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
         self.btn_recompute.clicked.connect(self._on_recompute)
+        self._magic_running = False
+        self.btn_magic.setText("✨  Magic")
+        try:
+            self.btn_magic.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self.btn_magic.clicked.connect(self._on_magic)
 
     def _on_morph_error(self, message: str) -> None:
         from PySide6.QtWidgets import QMessageBox
