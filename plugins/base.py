@@ -54,6 +54,7 @@ def interp_magnitude(
     t: float,
     mode: str = "log",
     floor_db: float = -100.0,
+    power: bool = False,
 ) -> np.ndarray:
     """Interpolate two magnitude spectra.
 
@@ -66,12 +67,19 @@ def interp_magnitude(
     intermediate steps quieter; pair it with match_step_loudness().
 
     "linear" is the plain arithmetic mean (pre-0.2 behaviour).
+
+    Values under `floor_db` relative to the larger peak are raised to it, so
+    the log of a silent bin stays finite. Pass `power=True` for power spectra
+    such as WORLD's envelope: dB of power is 10·log10, so reading the floor as
+    an amplitude would put it at -50 dB instead of -100. Real recordings reach
+    well below -50 dB in their pauses and top octaves, and WORLD rebuilt that
+    raised floor as broadband hiss even on an unmorphed resynthesis.
     """
     if mode == "linear":
         return (1.0 - t) * mag_a + t * mag_b
 
     ref = max(float(mag_a.max(initial=0.0)), float(mag_b.max(initial=0.0)), 1e-12)
-    floor = ref * (10.0 ** (floor_db / 20.0))
+    floor = ref * (10.0 ** (floor_db / (10.0 if power else 20.0)))
     log_a = np.log(np.maximum(mag_a, floor))
     log_b = np.log(np.maximum(mag_b, floor))
     return np.exp((1.0 - t) * log_a + t * log_b)

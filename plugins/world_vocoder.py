@@ -6,7 +6,13 @@ from typing import Any
 
 import numpy as np
 
-from plugins.base import MorphPlugin, PluginParam, interp_magnitude, match_lengths
+from plugins.base import (
+    MorphPlugin,
+    PluginParam,
+    both_present,
+    interp_magnitude,
+    match_lengths,
+)
 
 
 def _ensure_pyworld():
@@ -152,9 +158,27 @@ class WorldVocoderPlugin(MorphPlugin):
                 # Log-domain blend: the spectral envelope is a power spectrum, so
                 # an arithmetic blend stacks A's formants on top of B's instead
                 # of sliding one into the other.
-                sp_mix = interp_magnitude(sp_a[ch], sp_b[ch], t, mode=envelope)
+                sp_mix = interp_magnitude(
+                    sp_a[ch], sp_b[ch], t, mode=envelope, power=True
+                )
+                ap_mix = interp_magnitude(
+                    ap_a[ch], ap_b[ch], t, mode=envelope, power=True
+                )
+                # Where one source is silent or has died away, the geometric
+                # blend would take the other one down with it. Those frames
+                # get a plain crossfade of the two envelopes instead, as in
+                # the spectral plugins.
+                present = both_present(
+                    np.sum(sp_a[ch], axis=1), np.sum(sp_b[ch], axis=1)
+                )[:, np.newaxis]
+                sp_mix = present * sp_mix + (1.0 - present) * (
+                    (1.0 - t) * sp_a[ch] + t * sp_b[ch]
+                )
                 ap_mix = np.clip(
-                    interp_magnitude(ap_a[ch], ap_b[ch], t, mode=envelope), 0.0, 1.0
+                    present * ap_mix
+                    + (1.0 - present) * ((1.0 - t) * ap_a[ch] + t * ap_b[ch]),
+                    0.0,
+                    1.0,
                 )
                 synth = pw.synthesize(
                     f0_mix, sp_mix, ap_mix, sample_rate, frame_period=frame_ms
